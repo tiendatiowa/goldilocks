@@ -5,6 +5,18 @@
 #include <DallasTemperature.h>
 #include <Adafruit_NeoPixel.h>
 
+// -------------------------------------------------------------
+// Goldilocks Threshold Constants (Used for evaluation & website)
+// -------------------------------------------------------------
+const float SAL_MIN   = 15.0;  // Minimum Salinity (ppt)
+const float SAL_MAX   = 30.0;  // Maximum Salinity (ppt)
+
+const float TEMP_MIN  = 10.0;  // Minimum Temperature (°C)
+const float TEMP_MAX  = 25.0;  // Maximum Temperature (°C)
+
+const float DEPTH_MIN = 10.0;  // Minimum Depth (cm)
+const float DEPTH_MAX = 80.0;  // Maximum Depth (cm)
+
 // Pin Definitions
 #define RGB_PIN 3          // DFR0605 RGB Module
 #define ONE_WIRE_BUS 5     // Temperature Probe Pin
@@ -98,23 +110,22 @@ void loop() {
     distanceCm = (duration > 0) ? (duration * 0.034 / 2.0) : 0;
 
     // Read Salinity (ppt approximation)
-    // int rawEC = analogRead(EC_PIN);
-    // estimatedSalinity = map(rawEC, 0, 1023, 0, 40); 
-    estimatedSalinity = 20.4;
+    int rawEC = analogRead(EC_PIN);
+    estimatedSalinity = map(rawEC, 0, 1023, 0, 40); 
 
-    // Evaluate Thresholds
-    salinityOK = (estimatedSalinity >= 15.0 && estimatedSalinity <= 30.0);
-    tempOK     = (tempC >= 10.0 && tempC <= 25.0);
-    depthOK    = (distanceCm >= 10.0 && distanceCm <= 80.0);
+    // Evaluate Thresholds using extracted Constants
+    salinityOK = (estimatedSalinity >= SAL_MIN && estimatedSalinity <= SAL_MAX);
+    tempOK     = (tempC >= TEMP_MIN && tempC <= TEMP_MAX);
+    depthOK    = (distanceCm >= DEPTH_MIN && distanceCm <= DEPTH_MAX);
 
     isGoldilocks = salinityOK && tempOK && depthOK;
     passedCount  = (salinityOK ? 1 : 0) + (tempOK ? 1 : 0) + (depthOK ? 1 : 0);
 
-    // Build Line 2 Status Message (Shared between LCD and Web)
+    // Build Line 2 Status Message
     if (isGoldilocks) {
       statusLine2 = "GOLDILOCKS ZONE";
     } else if (passedCount == 0) {
-      statusLine2 = "CRITICAL FAIL!";
+      statusLine2 = "ALL FAIL!";
     } else {
       statusLine2 = "WARN: ";
       bool first = true;
@@ -149,7 +160,7 @@ void loop() {
     while (line1.length() < 16) line1 += " ";
     lcd.print(line1.substring(0, 16));
 
-    // Line 2 Status Display (Padded to 16 chars for LCD)
+    // Line 2 Status Display
     lcd.setCursor(0, 1);
     String line2Formatted = statusLine2;
     while (line2Formatted.length() < 16) line2Formatted += " ";
@@ -171,8 +182,8 @@ void loop() {
           client.println();
 
           // Status Badge Colors
-          String statusBg   = isGoldilocks ? "#28a745" : (passedCount == 0 ? "#dc3545" : "#ffc107");
-          String statusColor= (passedCount > 0 && !isGoldilocks) ? "#000000" : "#ffffff";
+          String statusBg    = isGoldilocks ? "#28a745" : (passedCount == 0 ? "#dc3545" : "#ffc107");
+          String statusColor = (passedCount > 0 && !isGoldilocks) ? "#000000" : "#ffffff";
 
           // Send HTML Webpage
           client.println("<!DOCTYPE html><html><head>");
@@ -180,9 +191,11 @@ void loop() {
           client.println("<meta http-equiv='refresh' content='3'>"); // Auto-refresh every 3s
           client.println("<style>");
           client.println("body { font-family: Arial; text-align: center; background: #eef2f5; margin:0; padding:20px; }");
-          client.println(".card { background: white; padding: 20px; border-radius: 12px; max-width: 380px; margin: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }");
+          client.println(".card { background: white; padding: 20px; border-radius: 12px; max-width: 400px; margin: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }");
           client.println(".badge { padding: 12px; border-radius: 8px; font-weight: bold; font-size: 18px; margin-bottom: 20px; }");
-          client.println(".row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; font-size: 18px; }");
+          client.println(".row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #eee; font-size: 16px; }");
+          client.println(".label { text-align: left; }");
+          client.println(".subtext { font-size: 12px; color: #777; display: block; }");
           client.println("</style></head><body>");
           
           client.println("<div class='card'>");
@@ -192,18 +205,45 @@ void loop() {
           client.print("; color:");
           client.print(statusColor);
           client.print(";'>");
-          client.print(statusLine2); // Displays exact string from Line 2
+          client.print(statusLine2);
           client.println("</div>");
 
-          client.print("<div class='row'><span>Salinity:</span><b>");
+          // Salinity Row
+          client.println("<div class='row'><div class='label'><b>Salinity</b>");
+          client.print("<span class='subtext'>Target: ");
+          client.print(SAL_MIN, 1);
+          client.print(" - ");
+          client.print(SAL_MAX, 1);
+          client.println(" ppt</span></div>");
+          client.print("<b style='font-size:18px; color:");
+          client.print(salinityOK ? "#28a745" : "#dc3545");
+          client.print(";'>");
           client.print(estimatedSalinity, 1);
           client.println(" ppt</b></div>");
 
-          client.print("<div class='row'><span>Temperature:</span><b>");
+          // Temperature Row
+          client.println("<div class='row'><div class='label'><b>Temperature</b>");
+          client.print("<span class='subtext'>Target: ");
+          client.print(TEMP_MIN, 1);
+          client.print(" - ");
+          client.print(TEMP_MAX, 1);
+          client.println(" &deg;C</span></div>");
+          client.print("<b style='font-size:18px; color:");
+          client.print(tempOK ? "#28a745" : "#dc3545");
+          client.print(";'>");
           client.print(tempC, 1);
           client.println(" &deg;C</b></div>");
 
-          client.print("<div class='row'><span>Depth:</span><b>");
+          // Depth Row
+          client.println("<div class='row'><div class='label'><b>Depth</b>");
+          client.print("<span class='subtext'>Target: ");
+          client.print(DEPTH_MIN, 1);
+          client.print(" - ");
+          client.print(DEPTH_MAX, 1);
+          client.println(" cm</span></div>");
+          client.print("<b style='font-size:18px; color:");
+          client.print(depthOK ? "#28a745" : "#dc3545");
+          client.print(";'>");
           client.print(distanceCm, 1);
           client.println(" cm</b></div>");
 
