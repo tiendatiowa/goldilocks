@@ -54,7 +54,7 @@ void setup() {
 
   // Initialize RGB LED
   rgbLed.begin();
-  rgbLed.setBrightness(120);
+  rgbLed.setBrightness(60);
   rgbLed.show();
 
   // Initialize Sensor Pins
