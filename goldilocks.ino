@@ -8,12 +8,15 @@
 // =============================================================
 // 1. CONFIGURATION & CONSTANTS
 // =============================================================
-const float SENSOR_OFFSET_CM = 35.56; // 14 inches mounting height
+const float SENSOR_OFFSET_CM = 35.56; // Fixed 14" height above water surface
 
 // Goldilocks Target Ranges
 const float SAL_MIN   = 15.0, SAL_MAX   = 30.0; // ppt
 const float TEMP_MIN  = 10.0, TEMP_MAX  = 25.0; // °C
 const float DEPTH_MIN = 10.0, DEPTH_MAX = 80.0; // cm
+
+// Data Logging Configuration (5 mins @ 1 sample / 2 sec = 150 samples)
+const int MAX_HISTORY = 150; 
 
 // Pin Definitions
 #define RGB_PIN 3       
@@ -29,21 +32,28 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature tempSensor(&oneWire);
 WiFiServer server(80);
 
-// Global Variables
+// Live Sensor Readings
 float tempC = 0.0;
 float calculatedDepthCm = 0.0;
 float estimatedSalinity = 0.0;
 
+// Goldilocks Status
 bool salinityOK = false;
 bool tempOK = false;
 bool depthOK = false;
 bool isGoldilocks = false;
 int passedCount = 0;
-
 String statusLine2 = "";
+
+// Time Series Memory
+float salHistory[MAX_HISTORY];
+float tempHistory[MAX_HISTORY];
+float depthHistory[MAX_HISTORY];
+int historyCount = 0;
 
 // Timing Controls
 unsigned long lastSensorRead = 0;
+unsigned long lastDataLog = 0;
 unsigned long lastPageSwitch = 0;
 int lcdPage = 0;
 
@@ -52,10 +62,11 @@ void readSensors();
 void evaluateHabitat();
 void updateStatusLED();
 void updateLCDScreen();
+void recordDataHistory();
 void handleWebDashboard();
 
 // =============================================================
-// 2. SETUP (Engine Start)
+// 2. SETUP
 // =============================================================
 void setup() {
   Serial.begin(9600);
@@ -87,12 +98,12 @@ void setup() {
 }
 
 // =============================================================
-// 3. MAIN LOOP (The Conductor)
+// 3. MAIN LOOP
 // =============================================================
 void loop() {
   unsigned long currentMillis = millis();
 
-  // Run Sensor & Logic Modules every 1 second
+  // Read & Evaluate Sensors (Every 1 Second)
   if (currentMillis - lastSensorRead >= 1000) {
     lastSensorRead = currentMillis;
     readSensors();
@@ -100,13 +111,19 @@ void loop() {
     updateStatusLED();
   }
 
-  // Run Display Module every 2 seconds
+  // Store Rolling Data History (Every 2 Seconds)
+  if (currentMillis - lastDataLog >= 2000) {
+    lastDataLog = currentMillis;
+    recordDataHistory();
+  }
+
+  // Rotate LCD Display Pages (Every 2 Seconds)
   if (currentMillis - lastPageSwitch >= 2000) {
     lastPageSwitch = currentMillis;
     updateLCDScreen();
   }
 
-  // Always listen for phone connections
+  // Serve Wi-Fi Requests
   handleWebDashboard();
 }
 
@@ -114,13 +131,11 @@ void loop() {
 // 4. CODE MODULES
 // =============================================================
 
-// MODULE 1: Read all 3 physical sensors (Floating Pod Mode)
 void readSensors() {
-  // 1. Read Temperature (°C)
   tempSensor.requestTemperatures();
   tempC = tempSensor.getTempCByIndex(0);
 
-  // 2. Read Depth with 5-Sample Median Filter
+  // 5-Sample Median Filter for Depth
   float samples[5];
   int validCount = 0;
 
@@ -139,15 +154,13 @@ void readSensors() {
     long duration = pulseIn(ECHO_PIN, HIGH, 35000);
     float dist = (duration > 0) ? (duration * 0.034 / 2.0) : 0;
 
-    // Filter valid range: 30cm (sensor blind zone) up to 250cm (2.5m depth)
     if (dist >= 30.0 && dist <= 250.0) {
       samples[validCount] = dist;
       validCount++;
     }
-    delay(30); // Small pause between ultrasonic bursts
+    delay(30);
   }
 
-  // Sort valid readings to select the median value
   float rawDistanceCm = 0.0;
   if (validCount > 0) {
     for (int i = 0; i < validCount - 1; i++) {
@@ -159,22 +172,19 @@ void readSensors() {
         }
       }
     }
-    rawDistanceCm = samples[validCount / 2]; // Select median sample
+    rawDistanceCm = samples[validCount / 2];
   }
 
-  // Calculate Water Depth for Floating Setup
   if (rawDistanceCm >= SENSOR_OFFSET_CM) {
     calculatedDepthCm = rawDistanceCm - SENSOR_OFFSET_CM;
   } else {
-    calculatedDepthCm = 0.0; // Dry / On land / Below offset
+    calculatedDepthCm = 0.0;
   }
 
-  // 3. Read Salinity (ppt)
   int rawEC = analogRead(EC_PIN);
   estimatedSalinity = map(rawEC, 0, 1023, 0, 40);
 }
 
-// MODULE 2: Evaluate readings against Goldilocks criteria
 void evaluateHabitat() {
   salinityOK = (estimatedSalinity >= SAL_MIN && estimatedSalinity <= SAL_MAX);
   tempOK     = (tempC >= TEMP_MIN && tempC <= TEMP_MAX);
@@ -183,7 +193,6 @@ void evaluateHabitat() {
   isGoldilocks = salinityOK && tempOK && depthOK;
   passedCount  = (salinityOK ? 1 : 0) + (tempOK ? 1 : 0) + (depthOK ? 1 : 0);
 
-  // Build Status String
   if (isGoldilocks) {
     statusLine2 = "GOLDILOCKS ZONE";
   } else if (passedCount == 0) {
@@ -197,23 +206,34 @@ void evaluateHabitat() {
   }
 }
 
-// MODULE 3: Change RGB light color
 void updateStatusLED() {
-  if (isGoldilocks) {
-    rgbLed.setPixelColor(0, rgbLed.Color(0, 255, 0));   // Green
-  } else if (passedCount > 0) {
-    rgbLed.setPixelColor(0, rgbLed.Color(255, 180, 0)); // Yellow
-  } else {
-    rgbLed.setPixelColor(0, rgbLed.Color(255, 0, 0));   // Red
-  }
+  if (isGoldilocks)      rgbLed.setPixelColor(0, rgbLed.Color(0, 255, 0));   // Green
+  else if (passedCount) rgbLed.setPixelColor(0, rgbLed.Color(255, 180, 0)); // Yellow
+  else                  rgbLed.setPixelColor(0, rgbLed.Color(255, 0, 0));   // Red
   rgbLed.show();
 }
 
-// MODULE 4: Update physical LCD screen
+void recordDataHistory() {
+  if (historyCount < MAX_HISTORY) {
+    salHistory[historyCount]   = estimatedSalinity;
+    tempHistory[historyCount]  = tempC;
+    depthHistory[historyCount] = calculatedDepthCm;
+    historyCount++;
+  } else {
+    for (int i = 0; i < MAX_HISTORY - 1; i++) {
+      salHistory[i]   = salHistory[i + 1];
+      tempHistory[i]  = tempHistory[i + 1];
+      depthHistory[i] = depthHistory[i + 1];
+    }
+    salHistory[MAX_HISTORY - 1]   = estimatedSalinity;
+    tempHistory[MAX_HISTORY - 1]  = tempC;
+    depthHistory[MAX_HISTORY - 1] = calculatedDepthCm;
+  }
+}
+
 void updateLCDScreen() {
   lcdPage = (lcdPage + 1) % 3;
 
-  // Line 1: Alternate parameter views
   lcd.setCursor(0, 0);
   String line1 = "";
   if (lcdPage == 0)      line1 = "Sal: " + String(estimatedSalinity, 1) + " ppt";
@@ -223,103 +243,157 @@ void updateLCDScreen() {
   while (line1.length() < 16) line1 += " ";
   lcd.print(line1.substring(0, 16));
 
-  // Line 2: Fixed Status
   lcd.setCursor(0, 1);
   String line2Formatted = statusLine2;
   while (line2Formatted.length() < 16) line2Formatted += " ";
   lcd.print(line2Formatted.substring(0, 16));
 }
 
-// MODULE 5: Serve phone dashboard over Wi-Fi
 void handleWebDashboard() {
   WiFiClient client = server.available();
   if (!client) return;
 
-  boolean currentLineIsBlank = true;
-  while (client.connected()) {
-    if (client.available()) {
-      char c = client.read();
-      if (c == '\n' && currentLineIsBlank) {
-        // Send HTTP Headers
-        client.println("HTTP/1.1 200 OK");
-        client.println("Content-Type: text/html");
-        client.println("Connection: close");
-        client.println();
+  String request = client.readStringUntil('\r');
+  client.flush();
 
-        String statusBg    = isGoldilocks ? "#28a745" : (passedCount == 0 ? "#dc3545" : "#ffc107");
-        String statusColor = (passedCount > 0 && !isGoldilocks) ? "#000000" : "#ffffff";
+  // 1. JSON DATA ENDPOINT
+  if (request.indexOf("/data") != -1) {
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: application/json");
+    client.println("Connection: close");
+    client.println();
 
-        // HTML Markup
-        client.println("<!DOCTYPE html><html><head>");
-        client.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
-        client.println("<meta http-equiv='refresh' content='3'>");
-        client.println("<style>");
-        client.println("body { font-family: Arial; text-align: center; background: #eef2f5; margin:0; padding:20px; }");
-        client.println(".card { background: white; padding: 20px; border-radius: 12px; max-width: 400px; margin: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }");
-        client.println(".badge { padding: 12px; border-radius: 8px; font-weight: bold; font-size: 18px; margin-bottom: 20px; }");
-        client.println(".row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #eee; font-size: 16px; }");
-        client.println(".label { text-align: left; }");
-        client.println(".subtext { font-size: 12px; color: #777; display: block; }");
-        client.println("</style></head><body>");
-        
-        client.println("<div class='card'>");
-        client.println("<h2>Goldilocks Pod</h2>");
-        
-        // Status Badge
-        client.print("<div class='badge' style='background:");
-        client.print(statusBg);
-        client.print("; color:");
-        client.print(statusColor);
-        client.print(";'>");
-        client.print(statusLine2);
-        client.println("</div>");
+    client.print("{\"salVal\":"); client.print(estimatedSalinity, 1);
+    client.print(",\"salOK\":"); client.print(salinityOK ? "true" : "false");
+    client.print(",\"tempVal\":"); client.print(tempC, 1);
+    client.print(",\"tempOK\":"); client.print(tempOK ? "true" : "false");
+    client.print(",\"depthVal\":"); client.print(calculatedDepthCm, 1);
+    client.print(",\"depthOK\":"); client.print(depthOK ? "true" : "false");
+    client.print(",\"status\":\""); client.print(statusLine2); client.print("\"");
+    client.print(",\"goldi\":"); client.print(isGoldilocks ? "true" : "false");
+    client.print(",\"passed\":"); client.print(passedCount);
 
-        // Salinity Row
-        client.println("<div class='row'><div class='label'><b>Salinity</b>");
-        client.print("<span class='subtext'>Target: ");
-        client.print(SAL_MIN, 1);
-        client.print(" - ");
-        client.print(SAL_MAX, 1);
-        client.println(" ppt</span></div>");
-        client.print("<b style='font-size:18px; color:");
-        client.print(salinityOK ? "#28a745" : "#dc3545");
-        client.print(";'>");
-        client.print(estimatedSalinity, 1);
-        client.println(" ppt</b></div>");
+    client.print(",\"sal\":[");
+    for (int i = 0; i < historyCount; i++) { client.print(salHistory[i], 1); if (i < historyCount - 1) client.print(","); }
+    client.print("],\"temp\":[");
+    for (int i = 0; i < historyCount; i++) { client.print(tempHistory[i], 1); if (i < historyCount - 1) client.print(","); }
+    client.print("],\"depth\":[");
+    for (int i = 0; i < historyCount; i++) { client.print(depthHistory[i], 1); if (i < historyCount - 1) client.print(","); }
+    client.print("]}");
+  } 
+  // 2. MAIN HTML PAGE
+  else {
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/html; charset=utf-8");
+    client.println("Connection: close");
+    client.println();
 
-        // Temperature Row
-        client.println("<div class='row'><div class='label'><b>Temperature</b>");
-        client.print("<span class='subtext'>Target: ");
-        client.print(TEMP_MIN, 1);
-        client.print(" - ");
-        client.print(TEMP_MAX, 1);
-        client.println(" &deg;C</span></div>");
-        client.print("<b style='font-size:18px; color:");
-        client.print(tempOK ? "#28a745" : "#dc3545");
-        client.print(";'>");
-        client.print(tempC, 1);
-        client.println(" &deg;C</b></div>");
+    client.println("<!DOCTYPE html><html><head>");
+    client.println("<meta charset='UTF-8'>"); // Enforces proper symbol rendering
+    client.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
+    client.println("<style>");
+    client.println("body { font-family: Arial; text-align: center; background: #eef2f5; margin:0; padding:15px; }");
+    client.println(".card { background: white; padding: 20px; border-radius: 12px; max-width: 420px; margin: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }");
+    client.println(".badge { padding: 12px; border-radius: 8px; font-weight: bold; font-size: 18px; margin-bottom: 20px; transition: all 0.3s; }");
+    client.println(".row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #eee; font-size: 16px; }");
+    client.println(".label { text-align: left; }");
+    client.println(".subtext { font-size: 12px; color: #777; display: block; }");
+    client.println("canvas { width: 100%; height: 110px; background: #fafafa; border: 1px solid #ddd; border-radius: 6px; margin-top: 6px; }");
+    client.println("</style></head><body>");
+    
+    client.println("<div class='card'>");
+    client.println("<h2>Goldilocks Pod</h2>");
+    
+    client.println("<div id='badge' class='badge'>Loading...</div>");
 
-        // Depth Row
-        client.println("<div class='row'><div class='label'><b>Depth</b>");
-        client.print("<span class='subtext'>Target: ");
-        client.print(DEPTH_MIN, 1);
-        client.print(" - ");
-        client.print(DEPTH_MAX, 1);
-        client.println(" cm</span></div>");
-        client.print("<b style='font-size:18px; color:");
-        client.print(depthOK ? "#28a745" : "#dc3545");
-        client.print(";'>");
-        client.print(calculatedDepthCm, 1);
-        client.println(" cm</b></div>");
+    // Salinity
+    client.println("<div class='row'><div class='label'><b>Salinity</b><span class='subtext'>Target: 15.0 - 30.0 ppt</span></div>");
+    client.println("<b id='salVal' style='font-size:18px;'>-- ppt</b></div>");
+    client.println("<canvas id='salChart'></canvas>");
 
-        client.println("</div></body></html>");
-        break;
-      }
-      if (c == '\n') currentLineIsBlank = true;
-      else if (c != '\r') currentLineIsBlank = false;
-    }
+    // Temperature (HTML uses &deg;C for standard header label)
+    client.println("<div class='row'><div class='label'><b>Temperature</b><span class='subtext'>Target: 10.0 - 25.0 &deg;C</span></div>");
+    client.println("<b id='tempVal' style='font-size:18px;'>-- &deg;C</b></div>");
+    client.println("<canvas id='tempChart'></canvas>");
+
+    // Depth
+    client.println("<div class='row'><div class='label'><b>Depth</b><span class='subtext'>Target: 10.0 - 80.0 cm</span></div>");
+    client.println("<b id='depthVal' style='font-size:18px;'>-- cm</b></div>");
+    client.println("<canvas id='depthChart'></canvas>");
+
+    client.println("</div>");
+
+    // JavaScript
+    client.println("<script>");
+    
+    client.println("function drawGraph(id, data, baseColor, minScale, maxScale, targetMin, targetMax) {");
+    client.println("  const c = document.getElementById(id); if(!c) return;");
+    client.println("  const ctx = c.getContext('2d');");
+    client.println("  c.width = c.clientWidth; c.height = c.clientHeight;");
+    client.println("  ctx.clearRect(0,0,c.width,c.height);");
+    
+    // Target Zone Background Shading
+    client.println("  let yMinTarget = c.height - ((targetMin - minScale)/(maxScale - minScale) * (c.height - 10) + 5);");
+    client.println("  let yMaxTarget = c.height - ((targetMax - minScale)/(maxScale - minScale) * (c.height - 10) + 5);");
+    client.println("  ctx.fillStyle = 'rgba(40, 167, 69, 0.08)';");
+    client.println("  ctx.fillRect(0, Math.min(yMinTarget, yMaxTarget), c.width, Math.abs(yMinTarget - yMaxTarget));");
+
+    client.println("  if(data.length < 2) return;");
+
+    // Line Segments
+    client.println("  for(let i=0; i<data.length-1; i++) {");
+    client.println("    let x1 = (i / (150 - 1)) * c.width;");
+    client.println("    let norm1 = (data[i] - minScale) / (maxScale - minScale);");
+    client.println("    let y1 = c.height - (Math.max(0, Math.min(1, norm1)) * (c.height - 10) + 5);");
+    client.println("    let x2 = ((i+1) / (150 - 1)) * c.width;");
+    client.println("    let norm2 = (data[i+1] - minScale) / (maxScale - minScale);");
+    client.println("    let y2 = c.height - (Math.max(0, Math.min(1, norm2)) * (c.height - 10) + 5);");
+    client.println("    let isOut = (data[i] < targetMin || data[i] > targetMax || data[i+1] < targetMin || data[i+1] > targetMax);");
+    client.println("    ctx.strokeStyle = isOut ? '#dc3545' : baseColor;");
+    client.println("    ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();");
+    client.println("  }");
+
+    // Red Out-of-Range Dots
+    client.println("  for(let i=0; i<data.length; i++) {");
+    client.println("    if(data[i] < targetMin || data[i] > targetMax) {");
+    client.println("      let x = (i / (150 - 1)) * c.width;");
+    client.println("      let norm = (data[i] - minScale) / (maxScale - minScale);");
+    client.println("      let y = c.height - (Math.max(0, Math.min(1, norm)) * (c.height - 10) + 5);");
+    client.println("      ctx.fillStyle = '#dc3545'; ctx.beginPath(); ctx.arc(x, y, 3, 0, 2 * Math.PI); ctx.fill();");
+    client.println("    }");
+    client.println("  }");
+    client.println("}");
+
+    // Dashboard Data Fetch
+    client.println("function updateDashboard() {");
+    client.println("  fetch('/data').then(r => r.json()).then(d => {");
+    client.println("    const b = document.getElementById('badge');");
+    client.println("    b.innerText = d.status;");
+    client.println("    b.style.background = d.goldi ? '#28a745' : (d.passed === 0 ? '#dc3545' : '#ffc107');");
+    client.println("    b.style.color = (d.passed > 0 && !d.goldi) ? '#000000' : '#ffffff';");
+
+    client.println("    const sEl = document.getElementById('salVal');");
+    client.println("    sEl.innerText = d.salVal.toFixed(1) + ' ppt'; sEl.style.color = d.salOK ? '#0077b6' : '#dc3545';");
+
+    // Uses \u00B0 Unicode escape to render ° cleanly on all mobile browsers
+    client.println("    const tEl = document.getElementById('tempVal');");
+    client.println("    tEl.innerText = d.tempVal.toFixed(1) + ' \\u00B0C'; tEl.style.color = d.tempOK ? '#00a896' : '#dc3545';");
+
+    client.println("    const dEl = document.getElementById('depthVal');");
+    client.println("    dEl.innerText = d.depthVal.toFixed(1) + ' cm'; dEl.style.color = d.depthOK ? '#7209b7' : '#dc3545';");
+
+    client.println("    drawGraph('salChart', d.sal, '#0077b6', 0, 40, 15.0, 30.0);");
+    client.println("    drawGraph('tempChart', d.temp, '#00a896', 0, 40, 10.0, 25.0);");
+    client.println("    drawGraph('depthChart', d.depth, '#7209b7', 0, 150, 10.0, 80.0);");
+    client.println("  }).catch(e => console.log(e));");
+    client.println("}");
+
+    client.println("updateDashboard(); setInterval(updateDashboard, 2000);");
+    client.println("</script></body></html>");
   }
+
   delay(1);
   client.stop();
 }
+
+
