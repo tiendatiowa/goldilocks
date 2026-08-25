@@ -8,7 +8,7 @@
 // =============================================================
 // 1. CONFIGURATION & CONSTANTS
 // =============================================================
-const float SENSOR_HEIGHT_CM = 35.56; // 14 inches mounting height
+const float SENSOR_OFFSET_CM = 35.56; // 14 inches mounting height
 
 // Goldilocks Target Ranges
 const float SAL_MIN   = 15.0, SAL_MAX   = 30.0; // ppt
@@ -114,34 +114,62 @@ void loop() {
 // 4. CODE MODULES
 // =============================================================
 
-// MODULE 1: Read all 3 physical sensors
+// MODULE 1: Read all 3 physical sensors (Floating Pod Mode)
 void readSensors() {
-  // Read Temperature (°C)
+  // 1. Read Temperature (°C)
   tempSensor.requestTemperatures();
   tempC = tempSensor.getTempCByIndex(0);
 
-  // Read Ultrasonic Depth (cm) with 14" offset
-  pinMode(ECHO_PIN, OUTPUT);
-  digitalWrite(ECHO_PIN, LOW);
-  delayMicroseconds(10);
-  pinMode(ECHO_PIN, INPUT);
+  // 2. Read Depth with 5-Sample Median Filter
+  float samples[5];
+  int validCount = 0;
 
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(30);
-  digitalWrite(TRIG_PIN, LOW);
+  for (int i = 0; i < 5; i++) {
+    pinMode(ECHO_PIN, OUTPUT);
+    digitalWrite(ECHO_PIN, LOW);
+    delayMicroseconds(10);
+    pinMode(ECHO_PIN, INPUT);
 
-  long duration = pulseIn(ECHO_PIN, HIGH, 35000);
-  float rawDistanceCm = (duration > 0) ? (duration * 0.034 / 2.0) : 0;
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(30);
+    digitalWrite(TRIG_PIN, LOW);
 
-  if (rawDistanceCm > 0 && rawDistanceCm <= SENSOR_HEIGHT_CM) {
-    calculatedDepthCm = SENSOR_HEIGHT_CM - rawDistanceCm;
-  } else {
-    calculatedDepthCm = 0.0;
+    long duration = pulseIn(ECHO_PIN, HIGH, 35000);
+    float dist = (duration > 0) ? (duration * 0.034 / 2.0) : 0;
+
+    // Filter valid range: 30cm (sensor blind zone) up to 250cm (2.5m depth)
+    if (dist >= 30.0 && dist <= 250.0) {
+      samples[validCount] = dist;
+      validCount++;
+    }
+    delay(30); // Small pause between ultrasonic bursts
   }
 
-  // Read Salinity (ppt)
+  // Sort valid readings to select the median value
+  float rawDistanceCm = 0.0;
+  if (validCount > 0) {
+    for (int i = 0; i < validCount - 1; i++) {
+      for (int j = i + 1; j < validCount; j++) {
+        if (samples[i] > samples[j]) {
+          float temp = samples[i];
+          samples[i] = samples[j];
+          samples[j] = temp;
+        }
+      }
+    }
+    rawDistanceCm = samples[validCount / 2]; // Select median sample
+  }
+
+  // Calculate Water Depth for Floating Setup
+  if (rawDistanceCm >= SENSOR_OFFSET_CM) {
+    calculatedDepthCm = rawDistanceCm - SENSOR_OFFSET_CM;
+  } else {
+    calculatedDepthCm = 0.0; // Dry / On land / Below offset
+  }
+
+  // 3. Read Salinity (ppt)
   int rawEC = analogRead(EC_PIN);
   estimatedSalinity = map(rawEC, 0, 1023, 0, 40);
 }
