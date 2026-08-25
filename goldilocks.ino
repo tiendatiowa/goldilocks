@@ -5,67 +5,71 @@
 #include <DallasTemperature.h>
 #include <Adafruit_NeoPixel.h>
 
-// -------------------------------------------------------------
-// Goldilocks Threshold Constants (Used for evaluation & website)
-// -------------------------------------------------------------
-const float SAL_MIN   = 15.0;  // Minimum Salinity (ppt)
-const float SAL_MAX   = 30.0;  // Maximum Salinity (ppt)
+// =============================================================
+// 1. CONFIGURATION & CONSTANTS
+// =============================================================
+const float SENSOR_HEIGHT_CM = 35.56; // 14 inches mounting height
 
-const float TEMP_MIN  = 10.0;  // Minimum Temperature (°C)
-const float TEMP_MAX  = 25.0;  // Maximum Temperature (°C)
-
-const float DEPTH_MIN = 10.0;  // Minimum Depth (cm)
-const float DEPTH_MAX = 80.0;  // Maximum Depth (cm)
+// Goldilocks Target Ranges
+const float SAL_MIN   = 15.0, SAL_MAX   = 30.0; // ppt
+const float TEMP_MIN  = 10.0, TEMP_MAX  = 25.0; // °C
+const float DEPTH_MIN = 10.0, DEPTH_MAX = 80.0; // cm
 
 // Pin Definitions
-#define RGB_PIN 3          // DFR0605 RGB Module
-#define ONE_WIRE_BUS 5     // Temperature Probe Pin
-#define TRIG_PIN 6         // Ultrasonic Trig Pin (RX on SEN0208)
-#define ECHO_PIN 7         // Ultrasonic Echo Pin (TX on SEN0208)
-#define EC_PIN A0          // Salinity Sensor Pin
+#define RGB_PIN 3       
+#define ONE_WIRE_BUS 5  
+#define TRIG_PIN 6      
+#define ECHO_PIN 7      
+#define EC_PIN A0       
 
-// Hardware Setup
+// Hardware Instances
 Adafruit_NeoPixel rgbLed(1, RGB_PIN, NEO_GRB + NEO_KHZ800);
-DFRobot_RGBLCD1602 lcd(0x6B, 16, 2); // Change to 0x60 if screen remains blank
+DFRobot_RGBLCD1602 lcd(0x6B, 16, 2); 
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature tempSensor(&oneWire);
-
-// Wi-Fi Web Server Setup (Port 80)
 WiFiServer server(80);
 
 // Global Variables
 float tempC = 0.0;
-float distanceCm = 0.0;
+float calculatedDepthCm = 0.0;
 float estimatedSalinity = 0.0;
+
 bool salinityOK = false;
 bool tempOK = false;
 bool depthOK = false;
 bool isGoldilocks = false;
 int passedCount = 0;
+
 String statusLine2 = "";
 
-// Non-blocking Timing Variables
+// Timing Controls
 unsigned long lastSensorRead = 0;
 unsigned long lastPageSwitch = 0;
 int lcdPage = 0;
 
+// Function Declarations
+void readSensors();
+void evaluateHabitat();
+void updateStatusLED();
+void updateLCDScreen();
+void handleWebDashboard();
+
+// =============================================================
+// 2. SETUP (Engine Start)
+// =============================================================
 void setup() {
   Serial.begin(9600);
 
-  // Initialize RGB LED
   rgbLed.begin();
-  rgbLed.setBrightness(60);
+  rgbLed.setBrightness(120);
   rgbLed.show();
 
-  // Initialize Sensor Pins
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
   digitalWrite(TRIG_PIN, LOW);
 
-  // Initialize Temperature Probe
   tempSensor.begin();
 
-  // Initialize LCD Display
   lcd.init();
   lcd.clear();
   lcd.setCursor(0, 0);
@@ -73,7 +77,6 @@ void setup() {
   lcd.setCursor(0, 1);
   lcd.print("Starting WiFi...");
 
-  // Start Access Point (AP Mode)
   WiFi.beginAP("Goldilocks-Pod");
   server.begin();
 
@@ -83,178 +86,212 @@ void setup() {
   lcd.clear();
 }
 
+// =============================================================
+// 3. MAIN LOOP (The Conductor)
+// =============================================================
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. READ SENSORS & EVALUATE (Every 1 Second)
+  // Run Sensor & Logic Modules every 1 second
   if (currentMillis - lastSensorRead >= 1000) {
     lastSensorRead = currentMillis;
-
-    // Read Temperature (°C)
-    tempSensor.requestTemperatures();
-    tempC = tempSensor.getTempCByIndex(0);
-
-    // Read Weather-proof SEN0208 Depth (cm)
-    pinMode(ECHO_PIN, OUTPUT);
-    digitalWrite(ECHO_PIN, LOW);
-    delayMicroseconds(10);
-    pinMode(ECHO_PIN, INPUT);
-
-    digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(10);
-    digitalWrite(TRIG_PIN, HIGH);
-    delayMicroseconds(30);
-    digitalWrite(TRIG_PIN, LOW);
-
-    long duration = pulseIn(ECHO_PIN, HIGH, 35000);
-    distanceCm = (duration > 0) ? (duration * 0.034 / 2.0) : 0;
-
-    // Read Salinity (ppt approximation)
-    int rawEC = analogRead(EC_PIN);
-    estimatedSalinity = map(rawEC, 0, 1023, 0, 40); 
-
-    // Evaluate Thresholds using extracted Constants
-    salinityOK = (estimatedSalinity >= SAL_MIN && estimatedSalinity <= SAL_MAX);
-    tempOK     = (tempC >= TEMP_MIN && tempC <= TEMP_MAX);
-    depthOK    = (distanceCm >= DEPTH_MIN && distanceCm <= DEPTH_MAX);
-
-    isGoldilocks = salinityOK && tempOK && depthOK;
-    passedCount  = (salinityOK ? 1 : 0) + (tempOK ? 1 : 0) + (depthOK ? 1 : 0);
-
-    // Build Line 2 Status Message
-    if (isGoldilocks) {
-      statusLine2 = "GOLDILOCKS ZONE";
-    } else if (passedCount == 0) {
-      statusLine2 = "ALL FAIL!";
-    } else {
-      statusLine2 = "WARN: ";
-      bool first = true;
-      if (!salinityOK) { statusLine2 += "SAL"; first = false; }
-      if (!tempOK)     { if (!first) statusLine2 += "/"; statusLine2 += "TEMP"; first = false; }
-      if (!depthOK)    { if (!first) statusLine2 += "/"; statusLine2 += "DEPTH"; }
-    }
-
-    // Update Status RGB LED
-    if (isGoldilocks) {
-      rgbLed.setPixelColor(0, rgbLed.Color(0, 255, 0));   // Green
-    } else if (passedCount > 0) {
-      rgbLed.setPixelColor(0, rgbLed.Color(255, 180, 0)); // Yellow
-    } else {
-      rgbLed.setPixelColor(0, rgbLed.Color(255, 0, 0));   // Red
-    }
-    rgbLed.show();
+    readSensors();
+    evaluateHabitat();
+    updateStatusLED();
   }
 
-  // 2. UPDATE LCD SCREEN (Alternate Line 1 Every 2 Seconds)
+  // Run Display Module every 2 seconds
   if (currentMillis - lastPageSwitch >= 2000) {
     lastPageSwitch = currentMillis;
-    lcdPage = (lcdPage + 1) % 3;
-
-    // Line 1 Page Rotation
-    lcd.setCursor(0, 0);
-    String line1 = "";
-    if (lcdPage == 0)      line1 = "Sal: " + String(estimatedSalinity, 1) + " ppt";
-    else if (lcdPage == 1) line1 = "Temp: " + String(tempC, 1) + " C";
-    else                   line1 = "Depth: " + String(distanceCm, 1) + " cm";
-
-    while (line1.length() < 16) line1 += " ";
-    lcd.print(line1.substring(0, 16));
-
-    // Line 2 Status Display
-    lcd.setCursor(0, 1);
-    String line2Formatted = statusLine2;
-    while (line2Formatted.length() < 16) line2Formatted += " ";
-    lcd.print(line2Formatted.substring(0, 16));
+    updateLCDScreen();
   }
 
-  // 3. HANDLE INCOMING WI-FI CLIENTS (Phone/Tablet Dashboard)
+  // Always listen for phone connections
+  handleWebDashboard();
+}
+
+// =============================================================
+// 4. CODE MODULES
+// =============================================================
+
+// MODULE 1: Read all 3 physical sensors
+void readSensors() {
+  // Read Temperature (°C)
+  tempSensor.requestTemperatures();
+  tempC = tempSensor.getTempCByIndex(0);
+
+  // Read Ultrasonic Depth (cm) with 14" offset
+  pinMode(ECHO_PIN, OUTPUT);
+  digitalWrite(ECHO_PIN, LOW);
+  delayMicroseconds(10);
+  pinMode(ECHO_PIN, INPUT);
+
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(30);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 35000);
+  float rawDistanceCm = (duration > 0) ? (duration * 0.034 / 2.0) : 0;
+
+  if (rawDistanceCm > 0 && rawDistanceCm <= SENSOR_HEIGHT_CM) {
+    calculatedDepthCm = SENSOR_HEIGHT_CM - rawDistanceCm;
+  } else {
+    calculatedDepthCm = 0.0;
+  }
+
+  // Read Salinity (ppt)
+  int rawEC = analogRead(EC_PIN);
+  estimatedSalinity = map(rawEC, 0, 1023, 0, 40);
+}
+
+// MODULE 2: Evaluate readings against Goldilocks criteria
+void evaluateHabitat() {
+  salinityOK = (estimatedSalinity >= SAL_MIN && estimatedSalinity <= SAL_MAX);
+  tempOK     = (tempC >= TEMP_MIN && tempC <= TEMP_MAX);
+  depthOK    = (calculatedDepthCm >= DEPTH_MIN && calculatedDepthCm <= DEPTH_MAX);
+
+  isGoldilocks = salinityOK && tempOK && depthOK;
+  passedCount  = (salinityOK ? 1 : 0) + (tempOK ? 1 : 0) + (depthOK ? 1 : 0);
+
+  // Build Status String
+  if (isGoldilocks) {
+    statusLine2 = "GOLDILOCKS ZONE";
+  } else if (passedCount == 0) {
+    statusLine2 = "CRITICAL FAIL!";
+  } else {
+    statusLine2 = "WARN: ";
+    bool first = true;
+    if (!salinityOK) { statusLine2 += "SAL"; first = false; }
+    if (!tempOK)     { if (!first) statusLine2 += "/"; statusLine2 += "TEMP"; first = false; }
+    if (!depthOK)    { if (!first) statusLine2 += "/"; statusLine2 += "DEPTH"; }
+  }
+}
+
+// MODULE 3: Change RGB light color
+void updateStatusLED() {
+  if (isGoldilocks) {
+    rgbLed.setPixelColor(0, rgbLed.Color(0, 255, 0));   // Green
+  } else if (passedCount > 0) {
+    rgbLed.setPixelColor(0, rgbLed.Color(255, 180, 0)); // Yellow
+  } else {
+    rgbLed.setPixelColor(0, rgbLed.Color(255, 0, 0));   // Red
+  }
+  rgbLed.show();
+}
+
+// MODULE 4: Update physical LCD screen
+void updateLCDScreen() {
+  lcdPage = (lcdPage + 1) % 3;
+
+  // Line 1: Alternate parameter views
+  lcd.setCursor(0, 0);
+  String line1 = "";
+  if (lcdPage == 0)      line1 = "Sal: " + String(estimatedSalinity, 1) + " ppt";
+  else if (lcdPage == 1) line1 = "Temp: " + String(tempC, 1) + " C";
+  else                   line1 = "Depth: " + String(calculatedDepthCm, 1) + " cm";
+
+  while (line1.length() < 16) line1 += " ";
+  lcd.print(line1.substring(0, 16));
+
+  // Line 2: Fixed Status
+  lcd.setCursor(0, 1);
+  String line2Formatted = statusLine2;
+  while (line2Formatted.length() < 16) line2Formatted += " ";
+  lcd.print(line2Formatted.substring(0, 16));
+}
+
+// MODULE 5: Serve phone dashboard over Wi-Fi
+void handleWebDashboard() {
   WiFiClient client = server.available();
-  if (client) {
-    boolean currentLineIsBlank = true;
-    while (client.connected()) {
-      if (client.available()) {
-        char c = client.read();
-        if (c == '\n' && currentLineIsBlank) {
-          // Send HTTP Header
-          client.println("HTTP/1.1 200 OK");
-          client.println("Content-Type: text/html");
-          client.println("Connection: close");
-          client.println();
+  if (!client) return;
 
-          // Status Badge Colors
-          String statusBg    = isGoldilocks ? "#28a745" : (passedCount == 0 ? "#dc3545" : "#ffc107");
-          String statusColor = (passedCount > 0 && !isGoldilocks) ? "#000000" : "#ffffff";
+  boolean currentLineIsBlank = true;
+  while (client.connected()) {
+    if (client.available()) {
+      char c = client.read();
+      if (c == '\n' && currentLineIsBlank) {
+        // Send HTTP Headers
+        client.println("HTTP/1.1 200 OK");
+        client.println("Content-Type: text/html");
+        client.println("Connection: close");
+        client.println();
 
-          // Send HTML Webpage
-          client.println("<!DOCTYPE html><html><head>");
-          client.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
-          client.println("<meta http-equiv='refresh' content='3'>"); // Auto-refresh every 3s
-          client.println("<style>");
-          client.println("body { font-family: Arial; text-align: center; background: #eef2f5; margin:0; padding:20px; }");
-          client.println(".card { background: white; padding: 20px; border-radius: 12px; max-width: 400px; margin: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }");
-          client.println(".badge { padding: 12px; border-radius: 8px; font-weight: bold; font-size: 18px; margin-bottom: 20px; }");
-          client.println(".row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #eee; font-size: 16px; }");
-          client.println(".label { text-align: left; }");
-          client.println(".subtext { font-size: 12px; color: #777; display: block; }");
-          client.println("</style></head><body>");
-          
-          client.println("<div class='card'>");
-          client.println("<h2>Goldilocks Pod</h2>");
-          client.print("<div class='badge' style='background:");
-          client.print(statusBg);
-          client.print("; color:");
-          client.print(statusColor);
-          client.print(";'>");
-          client.print(statusLine2);
-          client.println("</div>");
+        String statusBg    = isGoldilocks ? "#28a745" : (passedCount == 0 ? "#dc3545" : "#ffc107");
+        String statusColor = (passedCount > 0 && !isGoldilocks) ? "#000000" : "#ffffff";
 
-          // Salinity Row
-          client.println("<div class='row'><div class='label'><b>Salinity</b>");
-          client.print("<span class='subtext'>Target: ");
-          client.print(SAL_MIN, 1);
-          client.print(" - ");
-          client.print(SAL_MAX, 1);
-          client.println(" ppt</span></div>");
-          client.print("<b style='font-size:18px; color:");
-          client.print(salinityOK ? "#28a745" : "#dc3545");
-          client.print(";'>");
-          client.print(estimatedSalinity, 1);
-          client.println(" ppt</b></div>");
+        // HTML Markup
+        client.println("<!DOCTYPE html><html><head>");
+        client.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
+        client.println("<meta http-equiv='refresh' content='3'>");
+        client.println("<style>");
+        client.println("body { font-family: Arial; text-align: center; background: #eef2f5; margin:0; padding:20px; }");
+        client.println(".card { background: white; padding: 20px; border-radius: 12px; max-width: 400px; margin: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }");
+        client.println(".badge { padding: 12px; border-radius: 8px; font-weight: bold; font-size: 18px; margin-bottom: 20px; }");
+        client.println(".row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #eee; font-size: 16px; }");
+        client.println(".label { text-align: left; }");
+        client.println(".subtext { font-size: 12px; color: #777; display: block; }");
+        client.println("</style></head><body>");
+        
+        client.println("<div class='card'>");
+        client.println("<h2>Goldilocks Pod</h2>");
+        
+        // Status Badge
+        client.print("<div class='badge' style='background:");
+        client.print(statusBg);
+        client.print("; color:");
+        client.print(statusColor);
+        client.print(";'>");
+        client.print(statusLine2);
+        client.println("</div>");
 
-          // Temperature Row
-          client.println("<div class='row'><div class='label'><b>Temperature</b>");
-          client.print("<span class='subtext'>Target: ");
-          client.print(TEMP_MIN, 1);
-          client.print(" - ");
-          client.print(TEMP_MAX, 1);
-          client.println(" &deg;C</span></div>");
-          client.print("<b style='font-size:18px; color:");
-          client.print(tempOK ? "#28a745" : "#dc3545");
-          client.print(";'>");
-          client.print(tempC, 1);
-          client.println(" &deg;C</b></div>");
+        // Salinity Row
+        client.println("<div class='row'><div class='label'><b>Salinity</b>");
+        client.print("<span class='subtext'>Target: ");
+        client.print(SAL_MIN, 1);
+        client.print(" - ");
+        client.print(SAL_MAX, 1);
+        client.println(" ppt</span></div>");
+        client.print("<b style='font-size:18px; color:");
+        client.print(salinityOK ? "#28a745" : "#dc3545");
+        client.print(";'>");
+        client.print(estimatedSalinity, 1);
+        client.println(" ppt</b></div>");
 
-          // Depth Row
-          client.println("<div class='row'><div class='label'><b>Depth</b>");
-          client.print("<span class='subtext'>Target: ");
-          client.print(DEPTH_MIN, 1);
-          client.print(" - ");
-          client.print(DEPTH_MAX, 1);
-          client.println(" cm</span></div>");
-          client.print("<b style='font-size:18px; color:");
-          client.print(depthOK ? "#28a745" : "#dc3545");
-          client.print(";'>");
-          client.print(distanceCm, 1);
-          client.println(" cm</b></div>");
+        // Temperature Row
+        client.println("<div class='row'><div class='label'><b>Temperature</b>");
+        client.print("<span class='subtext'>Target: ");
+        client.print(TEMP_MIN, 1);
+        client.print(" - ");
+        client.print(TEMP_MAX, 1);
+        client.println(" &deg;C</span></div>");
+        client.print("<b style='font-size:18px; color:");
+        client.print(tempOK ? "#28a745" : "#dc3545");
+        client.print(";'>");
+        client.print(tempC, 1);
+        client.println(" &deg;C</b></div>");
 
-          client.println("</div></body></html>");
-          break;
-        }
-        if (c == '\n') currentLineIsBlank = true;
-        else if (c != '\r') currentLineIsBlank = false;
+        // Depth Row
+        client.println("<div class='row'><div class='label'><b>Depth</b>");
+        client.print("<span class='subtext'>Target: ");
+        client.print(DEPTH_MIN, 1);
+        client.print(" - ");
+        client.print(DEPTH_MAX, 1);
+        client.println(" cm</span></div>");
+        client.print("<b style='font-size:18px; color:");
+        client.print(depthOK ? "#28a745" : "#dc3545");
+        client.print(";'>");
+        client.print(calculatedDepthCm, 1);
+        client.println(" cm</b></div>");
+
+        client.println("</div></body></html>");
+        break;
       }
+      if (c == '\n') currentLineIsBlank = true;
+      else if (c != '\r') currentLineIsBlank = false;
     }
-    delay(1);
-    client.stop(); // Close connection
   }
+  delay(1);
+  client.stop();
 }
