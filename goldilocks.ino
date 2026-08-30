@@ -131,12 +131,16 @@ void loop() {
 // 4. CODE MODULES
 // =============================================================
 
+// Global variable to keep the dashboard stable during temporary dropouts
+float lastValidDepthCm = 20.0; // Default fallback depth
+
 void readSensors() {
+  // 1. Read Temperature (°C)
   tempSensor.requestTemperatures();
   tempC = tempSensor.getTempCByIndex(0);
 
-  // 5-Sample Median Filter for Depth
-  float samples[5];
+  // 2. Read Depth with Zero-Rejection & Ring-Down Settling
+  float validSamples[5];
   int validCount = 0;
 
   for (int i = 0; i < 5; i++) {
@@ -148,39 +152,49 @@ void readSensors() {
     digitalWrite(TRIG_PIN, LOW);
     delayMicroseconds(10);
     digitalWrite(TRIG_PIN, HIGH);
-    delayMicroseconds(30);
+    delayMicroseconds(30); // 30us pulse for Uno R4 + SEN0208
     digitalWrite(TRIG_PIN, LOW);
 
     long duration = pulseIn(ECHO_PIN, HIGH, 35000);
     float dist = (duration > 0) ? (duration * 0.034 / 2.0) : 0;
 
-    if (dist >= 30.0 && dist <= 250.0) {
-      samples[validCount] = dist;
+    // Strictly discard zeroes, blind zone (<30cm), or out-of-range (>300cm)
+    if (dist >= 30.0 && dist <= 300.0) {
+      validSamples[validCount] = dist;
       validCount++;
     }
-    delay(30);
+    
+    // Crucial for waterproof probes: 70ms delay for acoustic ring-down
+    delay(70); 
   }
 
-  float rawDistanceCm = 0.0;
+  // Process valid non-zero samples
   if (validCount > 0) {
+    // Sort valid samples
     for (int i = 0; i < validCount - 1; i++) {
       for (int j = i + 1; j < validCount; j++) {
-        if (samples[i] > samples[j]) {
-          float temp = samples[i];
-          samples[i] = samples[j];
-          samples[j] = temp;
+        if (validSamples[i] > validSamples[j]) {
+          float temp = validSamples[i];
+          validSamples[i] = validSamples[j];
+          validSamples[j] = temp;
         }
       }
     }
-    rawDistanceCm = samples[validCount / 2];
-  }
+    
+    float medianRawDist = validSamples[validCount / 2];
 
-  if (rawDistanceCm >= SENSOR_OFFSET_CM) {
-    calculatedDepthCm = rawDistanceCm - SENSOR_OFFSET_CM;
-  } else {
-    calculatedDepthCm = 0.0;
-  }
+    // Calculate depth for floating pod
+    if (medianRawDist >= SENSOR_OFFSET_CM) {
+      lastValidDepthCm = medianRawDist - SENSOR_OFFSET_CM;
+    } else {
+      lastValidDepthCm = 0.0;
+    }
+  } 
+  // If ALL 5 bursts failed, keep lastValidDepthCm (prevents single-frame dropouts to 0)
 
+  calculatedDepthCm = lastValidDepthCm;
+
+  // 3. Read Salinity (ppt)
   int rawEC = analogRead(EC_PIN);
   estimatedSalinity = map(rawEC, 0, 1023, 0, 40);
 }
@@ -289,7 +303,7 @@ void handleWebDashboard() {
     client.println();
 
     client.println("<!DOCTYPE html><html><head>");
-    client.println("<meta charset='UTF-8'>"); // Enforces proper symbol rendering
+    client.println("<meta charset='UTF-8'>");
     client.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
     client.println("<style>");
     client.println("body { font-family: Arial; text-align: center; background: #eef2f5; margin:0; padding:15px; }");
@@ -298,7 +312,7 @@ void handleWebDashboard() {
     client.println(".row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #eee; font-size: 16px; }");
     client.println(".label { text-align: left; }");
     client.println(".subtext { font-size: 12px; color: #777; display: block; }");
-    client.println("canvas { width: 100%; height: 110px; background: #fafafa; border: 1px solid #ddd; border-radius: 6px; margin-top: 6px; }");
+    client.println("canvas { width: 100%; height: 130px; background: #fafafa; border: 1px solid #ddd; border-radius: 6px; margin-top: 6px; }");
     client.println("</style></head><body>");
     
     client.println("<div class='card'>");
@@ -311,7 +325,7 @@ void handleWebDashboard() {
     client.println("<b id='salVal' style='font-size:18px;'>-- ppt</b></div>");
     client.println("<canvas id='salChart'></canvas>");
 
-    // Temperature (HTML uses &deg;C for standard header label)
+    // Temperature
     client.println("<div class='row'><div class='label'><b>Temperature</b><span class='subtext'>Target: 10.0 - 25.0 &deg;C</span></div>");
     client.println("<b id='tempVal' style='font-size:18px;'>-- &deg;C</b></div>");
     client.println("<canvas id='tempChart'></canvas>");
@@ -323,7 +337,7 @@ void handleWebDashboard() {
 
     client.println("</div>");
 
-    // JavaScript
+    // JavaScript: Graph Drawing with X-Axis Timestamps
     client.println("<script>");
     
     client.println("function drawGraph(id, data, baseColor, minScale, maxScale, targetMin, targetMax) {");
@@ -332,39 +346,54 @@ void handleWebDashboard() {
     client.println("  c.width = c.clientWidth; c.height = c.clientHeight;");
     client.println("  ctx.clearRect(0,0,c.width,c.height);");
     
-    // Target Zone Background Shading
-    client.println("  let yMinTarget = c.height - ((targetMin - minScale)/(maxScale - minScale) * (c.height - 10) + 5);");
-    client.println("  let yMaxTarget = c.height - ((targetMax - minScale)/(maxScale - minScale) * (c.height - 10) + 5);");
+    client.println("  let plotHeight = c.height - 20;"); // Reserve bottom 20px for timestamps
+
+    // Draw Target Zone Shading
+    client.println("  let yMinTarget = plotHeight - ((targetMin - minScale)/(maxScale - minScale) * (plotHeight - 10) + 5);");
+    client.println("  let yMaxTarget = plotHeight - ((targetMax - minScale)/(maxScale - minScale) * (plotHeight - 10) + 5);");
     client.println("  ctx.fillStyle = 'rgba(40, 167, 69, 0.08)';");
     client.println("  ctx.fillRect(0, Math.min(yMinTarget, yMaxTarget), c.width, Math.abs(yMinTarget - yMaxTarget));");
 
     client.println("  if(data.length < 2) return;");
 
-    // Line Segments
+    // Draw Line Segments
     client.println("  for(let i=0; i<data.length-1; i++) {");
     client.println("    let x1 = (i / (150 - 1)) * c.width;");
     client.println("    let norm1 = (data[i] - minScale) / (maxScale - minScale);");
-    client.println("    let y1 = c.height - (Math.max(0, Math.min(1, norm1)) * (c.height - 10) + 5);");
+    client.println("    let y1 = plotHeight - (Math.max(0, Math.min(1, norm1)) * (plotHeight - 10) + 5);");
     client.println("    let x2 = ((i+1) / (150 - 1)) * c.width;");
     client.println("    let norm2 = (data[i+1] - minScale) / (maxScale - minScale);");
-    client.println("    let y2 = c.height - (Math.max(0, Math.min(1, norm2)) * (c.height - 10) + 5);");
+    client.println("    let y2 = plotHeight - (Math.max(0, Math.min(1, norm2)) * (plotHeight - 10) + 5);");
     client.println("    let isOut = (data[i] < targetMin || data[i] > targetMax || data[i+1] < targetMin || data[i+1] > targetMax);");
     client.println("    ctx.strokeStyle = isOut ? '#dc3545' : baseColor;");
     client.println("    ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();");
     client.println("  }");
 
-    // Red Out-of-Range Dots
+    // Draw Red Out-of-Range Dots
     client.println("  for(let i=0; i<data.length; i++) {");
     client.println("    if(data[i] < targetMin || data[i] > targetMax) {");
     client.println("      let x = (i / (150 - 1)) * c.width;");
     client.println("      let norm = (data[i] - minScale) / (maxScale - minScale);");
-    client.println("      let y = c.height - (Math.max(0, Math.min(1, norm)) * (c.height - 10) + 5);");
+    client.println("      let y = plotHeight - (Math.max(0, Math.min(1, norm)) * (plotHeight - 10) + 5);");
     client.println("      ctx.fillStyle = '#dc3545'; ctx.beginPath(); ctx.arc(x, y, 3, 0, 2 * Math.PI); ctx.fill();");
     client.println("    }");
     client.println("  }");
+
+    // Render X-Axis Timestamps (Oldest, Middle, Latest)
+    client.println("  ctx.fillStyle = '#888888'; ctx.font = '10px Arial';");
+    client.println("  let now = new Date();");
+    client.println("  let indices = [0, Math.floor((data.length - 1) / 2), data.length - 1];");
+    client.println("  indices.forEach((idx, tIdx) => {");
+    client.println("    let timeOffsetMs = (data.length - 1 - idx) * 2000;");
+    client.println("    let t = new Date(now.getTime() - timeOffsetMs);");
+    client.println("    let timeStr = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });");
+    client.println("    let x = (idx / (150 - 1)) * c.width;");
+    client.println("    ctx.textAlign = (tIdx === 0) ? 'left' : (tIdx === 1 ? 'center' : 'right');");
+    client.println("    ctx.fillText(timeStr, x, c.height - 3);");
+    client.println("  });");
     client.println("}");
 
-    // Dashboard Data Fetch
+    // Fetch & Update Dashboard
     client.println("function updateDashboard() {");
     client.println("  fetch('/data').then(r => r.json()).then(d => {");
     client.println("    const b = document.getElementById('badge');");
@@ -375,7 +404,6 @@ void handleWebDashboard() {
     client.println("    const sEl = document.getElementById('salVal');");
     client.println("    sEl.innerText = d.salVal.toFixed(1) + ' ppt'; sEl.style.color = d.salOK ? '#0077b6' : '#dc3545';");
 
-    // Uses \u00B0 Unicode escape to render ° cleanly on all mobile browsers
     client.println("    const tEl = document.getElementById('tempVal');");
     client.println("    tEl.innerText = d.tempVal.toFixed(1) + ' \\u00B0C'; tEl.style.color = d.tempOK ? '#00a896' : '#dc3545';");
 
@@ -395,5 +423,3 @@ void handleWebDashboard() {
   delay(1);
   client.stop();
 }
-
-
