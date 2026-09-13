@@ -4,6 +4,7 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <Adafruit_NeoPixel.h>
+#include <DFRobot_EC.h>
 
 // =============================================================
 // 1. CONFIGURATION & CONSTANTS
@@ -31,6 +32,7 @@ DFRobot_RGBLCD1602 lcd(0x6B, 16, 2);
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature tempSensor(&oneWire);
 WiFiServer server(80);
+DFRobot_EC ec;
 
 // Live Sensor Readings
 float tempC = 0.0;
@@ -95,6 +97,8 @@ void setup() {
   lcd.print("IP: 192.168.4.1 ");
   delay(2000);
   lcd.clear();
+
+  ec.begin(); // Load saved calibration factors from EEPROM
 }
 
 // =============================================================
@@ -195,8 +199,17 @@ void readSensors() {
   calculatedDepthCm = lastValidDepthCm;
 
   // 3. Read Salinity (ppt)
-  int rawEC = analogRead(EC_PIN);
-  estimatedSalinity = map(rawEC, 0, 1023, 0, 40);
+  // 1. Get calibrated conductivity from the library (mS/cm)
+  int voltage = analogRead(EC_PIN) / 1024.0 * 5000.0;
+  float ecValue = ec.readEC(voltage, tempC); // mS/cm
+
+  // 2. Convert mS/cm to Salinity (ppt)
+  estimatedSalinity = ecValue * 0.66;
+
+  Serial.print("ecValue: ");
+  Serial.print(ecValue, 2);
+  Serial.print(" | estimatedSalinity: ");
+  Serial.println(estimatedSalinity, 2);
 }
 
 void evaluateHabitat() {
