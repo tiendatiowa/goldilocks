@@ -1,5 +1,6 @@
 #include <WiFiS3.h>
 #include <Wire.h>
+#include <RTC.h>
 #include <DFRobot_RGBLCD1602.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -16,15 +17,27 @@ const float SAL_MIN   = 15.0, SAL_MAX   = 30.0; // ppt
 const float TEMP_MIN  = 10.0, TEMP_MAX  = 25.0; // °C
 const float DEPTH_MIN = 10.0, DEPTH_MAX = 80.0; // cm
 
-// Data Logging Configuration (5 mins @ 1 sample / 2 sec = 150 samples)
-const int MAX_HISTORY = 150; 
+// Data Logging Configurations
+const int MAX_HISTORY = 150;     // Rolling graph history (5 mins @ 1 sample / 2 sec)
+const int MAX_FIELD_LOG = 360;   // Field test log (3 hours @ 1 sample / 30 sec)
 
 // Pin Definitions
-#define RGB_PIN 3       
-#define ONE_WIRE_BUS 5  
-#define TRIG_PIN 6      
-#define ECHO_PIN 7      
-#define EC_PIN A0       
+#define RGB_PIN 3
+#define ONE_WIRE_BUS 5
+#define TRIG_PIN 6
+#define ECHO_PIN 7
+#define EC_PIN A0
+
+// Long-Term Field Sample Memory Structure
+struct FieldSample {
+  unsigned long epochTime; // Real-world Unix timestamp
+  float temperature;
+  float salinity;
+  float depth;
+};
+
+FieldSample fieldLog[MAX_FIELD_LOG];
+int fieldLogIndex = 0;
 
 // Hardware Instances
 Adafruit_NeoPixel rgbLed(1, RGB_PIN, NEO_GRB + NEO_KHZ800);
@@ -38,6 +51,7 @@ DFRobot_EC ec;
 float tempC = 0.0;
 float calculatedDepthCm = 0.0;
 float estimatedSalinity = 0.0;
+float lastValidDepthCm = 20.0; // Default fallback depth
 
 // Goldilocks Status
 bool salinityOK = false;
@@ -47,15 +61,17 @@ bool isGoldilocks = false;
 int passedCount = 0;
 String statusLine2 = "";
 
-// Time Series Memory
+// Rolling Time Series Memory (for live Canvas chart)
 float salHistory[MAX_HISTORY];
 float tempHistory[MAX_HISTORY];
 float depthHistory[MAX_HISTORY];
 int historyCount = 0;
+bool timestampSet = false;
 
 // Timing Controls
 unsigned long lastSensorRead = 0;
-unsigned long lastDataLog = 0;
+unsigned long lastDataLog = 0;      // 2-second chart logger
+unsigned long lastFieldLog = 0;     // 30-second 3-hour logger
 unsigned long lastPageSwitch = 0;
 int lcdPage = 0;
 
@@ -65,13 +81,17 @@ void evaluateHabitat();
 void updateStatusLED();
 void updateLCDScreen();
 void recordDataHistory();
+void recordFieldSample();
 void handleWebDashboard();
 
 // =============================================================
 // 2. SETUP
 // =============================================================
 void setup() {
-  Serial.begin(9600);
+  // Serial.begin(115200);
+
+  // Initialize Uno R4 Native Real-Time Clock
+  RTC.begin();
 
   rgbLed.begin();
   rgbLed.setBrightness(120);
@@ -107,7 +127,7 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // Read & Evaluate Sensors (Every 1 Second)
+  // 1. Read & Evaluate Sensors (Every 1 Second)
   if (currentMillis - lastSensorRead >= 1000) {
     lastSensorRead = currentMillis;
     readSensors();
@@ -115,28 +135,31 @@ void loop() {
     updateStatusLED();
   }
 
-  // Store Rolling Data History (Every 2 Seconds)
+  // 2. Store Rolling Chart Data (Every 2 Seconds)
   if (currentMillis - lastDataLog >= 2000) {
     lastDataLog = currentMillis;
     recordDataHistory();
   }
 
-  // Rotate LCD Display Pages (Every 2 Seconds)
+  // 3. Store 3-Hour Long-Term Log (Every 30 Seconds)
+  if (currentMillis - lastFieldLog >= 30000) {
+    lastFieldLog = currentMillis;
+    recordFieldSample();
+  }
+
+  // 4. Rotate LCD Display Pages (Every 2 Seconds)
   if (currentMillis - lastPageSwitch >= 2000) {
     lastPageSwitch = currentMillis;
     updateLCDScreen();
   }
 
-  // Serve Wi-Fi Requests
+  // 5. Serve Wi-Fi Requests
   handleWebDashboard();
 }
 
 // =============================================================
 // 4. CODE MODULES
 // =============================================================
-
-// Global variable to keep the dashboard stable during temporary dropouts
-float lastValidDepthCm = 20.0; // Default fallback depth
 
 void readSensors() {
   // 1. Read Temperature (°C)
@@ -168,13 +191,11 @@ void readSensors() {
       validCount++;
     }
     
-    // Crucial for waterproof probes: 70ms delay for acoustic ring-down
-    delay(70); 
+    delay(70); // 70ms delay for acoustic ring-down
   }
 
   // Process valid non-zero samples
   if (validCount > 0) {
-    // Sort valid samples
     for (int i = 0; i < validCount - 1; i++) {
       for (int j = i + 1; j < validCount; j++) {
         if (validSamples[i] > validSamples[j]) {
@@ -187,29 +208,20 @@ void readSensors() {
     
     float medianRawDist = validSamples[validCount / 2];
 
-    // Calculate depth for floating pod
     if (medianRawDist >= SENSOR_OFFSET_CM) {
       lastValidDepthCm = medianRawDist - SENSOR_OFFSET_CM;
     } else {
       lastValidDepthCm = 0.0;
     }
   } 
-  // If ALL 5 bursts failed, keep lastValidDepthCm (prevents single-frame dropouts to 0)
 
   calculatedDepthCm = lastValidDepthCm;
 
   // 3. Read Salinity (ppt)
-  // 1. Get calibrated conductivity from the library (mS/cm)
-  int voltage = analogRead(EC_PIN) / 1024.0 * 5000.0;
+  float voltage = analogRead(EC_PIN) / 1024.0 * 5000.0;
   float ecValue = ec.readEC(voltage, tempC); // mS/cm
-
-  // 2. Convert mS/cm to Salinity (ppt)
   estimatedSalinity = ecValue * 0.66;
-
-  Serial.print("ecValue: ");
-  Serial.print(ecValue, 2);
-  Serial.print(" | estimatedSalinity: ");
-  Serial.println(estimatedSalinity, 2);
+  if (estimatedSalinity < 0) estimatedSalinity = 0.0;
 }
 
 void evaluateHabitat() {
@@ -240,6 +252,7 @@ void updateStatusLED() {
   rgbLed.show();
 }
 
+// 2-second interval rolling array (for 5-min live Canvas charts)
 void recordDataHistory() {
   if (historyCount < MAX_HISTORY) {
     salHistory[historyCount]   = estimatedSalinity;
@@ -255,6 +268,33 @@ void recordDataHistory() {
     salHistory[MAX_HISTORY - 1]   = estimatedSalinity;
     tempHistory[MAX_HISTORY - 1]  = tempC;
     depthHistory[MAX_HISTORY - 1] = calculatedDepthCm;
+  }
+}
+
+// 30-second interval long-term field logger (for downloadable CSV export)
+void recordFieldSample() {
+  if (timestampSet) {
+    RTCTime currentTime;
+    RTC.getTime(currentTime);
+
+    if (fieldLogIndex < MAX_FIELD_LOG) {
+      fieldLog[fieldLogIndex].epochTime = currentTime.getUnixTime();
+      fieldLog[fieldLogIndex].temperature = tempC;
+      fieldLog[fieldLogIndex].salinity = estimatedSalinity;
+      fieldLog[fieldLogIndex].depth = calculatedDepthCm;
+      fieldLogIndex++;
+    } else {
+      for (int i = 0; i < MAX_FIELD_LOG - 1; i++) {
+        fieldLog[i].epochTime   = fieldLog[i + 1].epochTime;
+        fieldLog[i].temperature  = fieldLog[i + 1].temperature;
+        fieldLog[i].salinity = fieldLog[i + 1].salinity;
+        fieldLog[i].depth = fieldLog[i + 1].depth;
+      }
+      fieldLog[MAX_FIELD_LOG - 1].epochTime = currentTime.getUnixTime();
+      fieldLog[MAX_FIELD_LOG - 1].temperature = tempC;
+      fieldLog[MAX_FIELD_LOG - 1].salinity = estimatedSalinity;
+      fieldLog[MAX_FIELD_LOG - 1].depth = calculatedDepthCm;
+    }
   }
 }
 
@@ -283,8 +323,46 @@ void handleWebDashboard() {
   String request = client.readStringUntil('\r');
   client.flush();
 
-  // 1. JSON DATA ENDPOINT
-  if (request.indexOf("/data") != -1) {
+  // 1. ROUTE: RTC TIME SYNC (/settime?epoch=1726500000)
+  if (request.indexOf("/settime?epoch=") != -1) {
+    int startIdx = request.indexOf("epoch=") + 6;
+    int endIdx = request.indexOf(" ", startIdx);
+    String epochStr = request.substring(startIdx, endIdx);
+    unsigned long epoch = strtoul(epochStr.c_str(), NULL, 10);
+
+    if (epoch > 0) {
+      RTCTime newTime(epoch);
+      RTC.setTime(newTime);
+      timestampSet = true;
+    }
+
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/plain");
+    client.println("Connection: close\r\n");
+    client.println("OK");
+  }
+  // 2. ROUTE: DOWNLOAD CSV FILE (/csv)
+  else if (request.indexOf("/csv") != -1) {
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/csv");
+    client.println("Content-Disposition: attachment; filename=\"goldilocks_stage1_test.csv\"");
+    client.println("Connection: close\r\n");
+
+    client.println("Sample_ID,Unix_Timestamp,Temperature_C,Salinity_ppt,Depth_cm");
+    for (int i = 0; i < fieldLogIndex; i++) {
+      client.print(i + 1);
+      client.print(",");
+      client.print(fieldLog[i].epochTime);
+      client.print(",");
+      client.print(fieldLog[i].temperature, 1);
+      client.print(",");
+      client.print(fieldLog[i].salinity, 1);
+      client.print(",");
+      client.println(fieldLog[i].depth, 1);
+    }
+  }
+  // 3. ROUTE: JSON DATA ENDPOINT FOR DASHBOARD (/data)
+  else if (request.indexOf("/data") != -1) {
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: application/json");
     client.println("Connection: close");
@@ -299,6 +377,7 @@ void handleWebDashboard() {
     client.print(",\"status\":\""); client.print(statusLine2); client.print("\"");
     client.print(",\"goldi\":"); client.print(isGoldilocks ? "true" : "false");
     client.print(",\"passed\":"); client.print(passedCount);
+    client.print(",\"samples\":"); client.print(fieldLogIndex);
 
     client.print(",\"sal\":[");
     for (int i = 0; i < historyCount; i++) { client.print(salHistory[i], 1); if (i < historyCount - 1) client.print(","); }
@@ -308,7 +387,7 @@ void handleWebDashboard() {
     for (int i = 0; i < historyCount; i++) { client.print(depthHistory[i], 1); if (i < historyCount - 1) client.print(","); }
     client.print("]}");
   } 
-  // 2. MAIN HTML PAGE
+  // 4. ROUTE: MAIN HTML PAGE (/)
   else {
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: text/html; charset=utf-8");
@@ -326,6 +405,7 @@ void handleWebDashboard() {
     client.println(".label { text-align: left; }");
     client.println(".subtext { font-size: 12px; color: #777; display: block; }");
     client.println("canvas { width: 100%; height: 130px; background: #fafafa; border: 1px solid #ddd; border-radius: 6px; margin-top: 6px; }");
+    client.println(".btn { display: block; width: 100%; box-sizing: border-box; padding: 14px; background: #28a745; color: white; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px; margin-top: 20px; text-align: center; }");
     client.println("</style></head><body>");
     
     client.println("<div class='card'>");
@@ -348,18 +428,24 @@ void handleWebDashboard() {
     client.println("<b id='depthVal' style='font-size:18px;'>-- cm</b></div>");
     client.println("<canvas id='depthChart'></canvas>");
 
+    // Long-term log counter & CSV download button
+    client.println("<a href='/csv' class='btn'>Download CSV Data (<span id='logCount'>0</span>/360)</a>");
+
     client.println("</div>");
 
-    // JavaScript: Graph Drawing with X-Axis Timestamps
+    // JavaScript: Dashboard Fetching, Auto-Time Sync & Graph Drawing
     client.println("<script>");
     
+    // Silent auto-sync phone time on connection
+    client.println("fetch('/settime?epoch=' + Math.floor(Date.now() / 1000));");
+
     client.println("function drawGraph(id, data, baseColor, minScale, maxScale, targetMin, targetMax) {");
     client.println("  const c = document.getElementById(id); if(!c) return;");
     client.println("  const ctx = c.getContext('2d');");
     client.println("  c.width = c.clientWidth; c.height = c.clientHeight;");
     client.println("  ctx.clearRect(0,0,c.width,c.height);");
     
-    client.println("  let plotHeight = c.height - 20;"); // Reserve bottom 20px for timestamps
+    client.println("  let plotHeight = c.height - 20;");
 
     // Draw Target Zone Shading
     client.println("  let yMinTarget = plotHeight - ((targetMin - minScale)/(maxScale - minScale) * (plotHeight - 10) + 5);");
@@ -422,6 +508,8 @@ void handleWebDashboard() {
 
     client.println("    const dEl = document.getElementById('depthVal');");
     client.println("    dEl.innerText = d.depthVal.toFixed(1) + ' cm'; dEl.style.color = d.depthOK ? '#7209b7' : '#dc3545';");
+
+    client.println("    document.getElementById('logCount').innerText = d.samples;");
 
     client.println("    drawGraph('salChart', d.sal, '#0077b6', 0, 40, 15.0, 30.0);");
     client.println("    drawGraph('tempChart', d.temp, '#00a896', 0, 40, 10.0, 25.0);");
