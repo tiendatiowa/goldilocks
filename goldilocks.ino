@@ -102,6 +102,8 @@ void setup() {
   digitalWrite(TRIG_PIN, LOW);
 
   tempSensor.begin();
+  tempSensor.setWaitForConversion(false); // Initiate async mode
+  tempSensor.requestTemperatures(); // Initial trigger
 
   lcd.init();
   lcd.clear();
@@ -163,14 +165,14 @@ void loop() {
 
 void readSensors() {
   // 1. Read Temperature (°C)
-  tempSensor.requestTemperatures();
-  tempC = tempSensor.getTempCByIndex(0);
+  tempC = tempSensor.getTempCByIndex(0); // Get the previous temperature and request next reading
+  tempSensor.requestTemperatures(); // trigger background conversion for the next loop
 
   // 2. Read Depth with Zero-Rejection & Ring-Down Settling
-  float validSamples[5];
+  int numOfSamples = 3;
+  float validSamples[numOfSamples];
   int validCount = 0;
-
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < numOfSamples; i++) {
     pinMode(ECHO_PIN, OUTPUT);
     digitalWrite(ECHO_PIN, LOW);
     delayMicroseconds(10);
