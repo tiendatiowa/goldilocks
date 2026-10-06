@@ -6,6 +6,8 @@
 #include <DallasTemperature.h>
 #include <Adafruit_NeoPixel.h>
 #include <DFRobot_EC.h>
+#include <SPI.h>
+#include <SD.h>
 
 // =============================================================
 // 1. CONFIGURATION & CONSTANTS
@@ -19,7 +21,8 @@ const float DEPTH_MIN = 10.0, DEPTH_MAX = 80.0; // cm
 
 // Data Logging Configurations
 const int MAX_HISTORY = 150;     // Rolling graph history (5 mins @ 1 sample / 2 sec)
-const int MAX_FIELD_LOG = 360;   // Field test log (3 hours @ 1 sample / 30 sec)
+const int SD_CS_PIN   = 2;       // DFR0229 Chip Select pin on Expansion Shield v7.1
+const char* LOG_FILENAME = "data.csv";
 
 // Pin Definitions
 #define RGB_PIN 3
@@ -28,16 +31,9 @@ const int MAX_FIELD_LOG = 360;   // Field test log (3 hours @ 1 sample / 30 sec)
 #define ECHO_PIN 7
 #define EC_PIN A0
 
-// Long-Term Field Sample Memory Structure
-struct FieldSample {
-  unsigned long epochTime; // Real-world Unix timestamp
-  float temperature;
-  float salinity;
-  float depth;
-};
-
-FieldSample fieldLog[MAX_FIELD_LOG];
-int fieldLogIndex = 0;
+// MicroSD Status Variables
+bool sdOK = false;
+int sdSampleCount = 0;
 
 // Hardware Instances
 Adafruit_NeoPixel rgbLed(1, RGB_PIN, NEO_GRB + NEO_KHZ800);
@@ -71,7 +67,7 @@ bool timestampSet = false;
 // Timing Controls
 unsigned long lastSensorRead = 0;
 unsigned long lastDataLog = 0;      // 2-second chart logger
-unsigned long lastFieldLog = 0;     // 30-second 3-hour logger
+unsigned long lastFieldLog = 0;     // 30-second logger
 unsigned long lastPageSwitch = 0;
 int lcdPage = 0;
 
@@ -88,7 +84,7 @@ void handleWebDashboard();
 // 2. SETUP
 // =============================================================
 void setup() {
-  // Serial.begin(115200);
+  Serial.begin(115200);
 
   // Initialize Uno R4 Native Real-Time Clock
   RTC.begin();
@@ -103,14 +99,42 @@ void setup() {
 
   tempSensor.begin();
   tempSensor.setWaitForConversion(false); // Initiate async mode
-  tempSensor.requestTemperatures(); // Initial trigger
+  tempSensor.requestTemperatures();       // Initial trigger
 
   lcd.init();
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("Goldilocks Pod");
   lcd.setCursor(0, 1);
-  lcd.print("Starting WiFi...");
+  lcd.print("Starting SD & AP...");
+
+  // Initialize MicroSD Card Module (DFR0229 on Pin 4)
+  if (SD.begin(SD_CS_PIN)) {
+    sdOK = true;
+    Serial.println("SD Card Initialized Successfully!");
+
+    // Create file and CSV header if file doesn't exist
+    if (!SD.exists(LOG_FILENAME)) {
+      File logFile = SD.open(LOG_FILENAME, FILE_WRITE);
+      if (logFile) {
+        logFile.println("Sample_ID,Unix_Timestamp,Temperature_C,Salinity_ppt,Depth_cm");
+        logFile.close();
+      }
+    } else {
+      // If file exists, count existing sample lines to resume ID count after reboot
+      File logFile = SD.open(LOG_FILENAME, FILE_READ);
+      if (logFile) {
+        int lines = 0;
+        while (logFile.available()) {
+          if (logFile.read() == '\n') lines++;
+        }
+        logFile.close();
+        if (lines > 0) sdSampleCount = lines - 1; // Exclude header line
+      }
+    }
+  } else {
+    Serial.println("SD Card Initialization Failed! Check CS Pin & Wiring.");
+  }
 
   WiFi.beginAP("Goldilocks-Pod");
   server.begin();
@@ -143,7 +167,7 @@ void loop() {
     recordDataHistory();
   }
 
-  // 3. Store 3-Hour Long-Term Log (Every 30 Seconds)
+  // 3. Store Long-Term Sample to MicroSD (Every 30 Seconds)
   if (currentMillis - lastFieldLog >= 30000) {
     lastFieldLog = currentMillis;
     recordFieldSample();
@@ -165,13 +189,14 @@ void loop() {
 
 void readSensors() {
   // 1. Read Temperature (°C)
-  tempC = tempSensor.getTempCByIndex(0); // Get the previous temperature and request next reading
-  tempSensor.requestTemperatures(); // trigger background conversion for the next loop
+  tempC = tempSensor.getTempCByIndex(0);
+  tempSensor.requestTemperatures(); // trigger background conversion for next loop
 
   // 2. Read Depth with Zero-Rejection & Ring-Down Settling
   int numOfSamples = 3;
   float validSamples[numOfSamples];
   int validCount = 0;
+
   for (int i = 0; i < numOfSamples; i++) {
     pinMode(ECHO_PIN, OUTPUT);
     digitalWrite(ECHO_PIN, LOW);
@@ -221,7 +246,7 @@ void readSensors() {
 
   // 3. Read Salinity (ppt)
   float voltage = analogRead(EC_PIN) / 1024.0 * 5000.0;
-  float ecValue = ec.readEC(voltage, tempC); // mS/cm
+  float ecValue = ec.readEC(voltage, tempC > 0 ? tempC : 25.0); // mS/cm
   estimatedSalinity = ecValue * 0.66;
   if (estimatedSalinity < 0) estimatedSalinity = 0.0;
 }
@@ -273,29 +298,31 @@ void recordDataHistory() {
   }
 }
 
-// 30-second interval long-term field logger (for downloadable CSV export)
+// 30-second interval long-term field logger (Appends directly to MicroSD)
 void recordFieldSample() {
-  if (timestampSet) {
+  if (timestampSet && sdOK) {
     RTCTime currentTime;
     RTC.getTime(currentTime);
+    unsigned long epoch = currentTime.getUnixTime();
 
-    if (fieldLogIndex < MAX_FIELD_LOG) {
-      fieldLog[fieldLogIndex].epochTime = currentTime.getUnixTime();
-      fieldLog[fieldLogIndex].temperature = tempC;
-      fieldLog[fieldLogIndex].salinity = estimatedSalinity;
-      fieldLog[fieldLogIndex].depth = calculatedDepthCm;
-      fieldLogIndex++;
+    File logFile = SD.open(LOG_FILENAME, FILE_WRITE);
+    if (logFile) {
+      sdSampleCount++;
+      logFile.print(sdSampleCount);
+      logFile.print(",");
+      logFile.print(epoch);
+      logFile.print(",");
+      logFile.print(tempC, 1);
+      logFile.print(",");
+      logFile.print(estimatedSalinity, 1);
+      logFile.print(",");
+      logFile.println(calculatedDepthCm, 1);
+      logFile.close();
+
+      Serial.print("SD Logged Sample #");
+      Serial.println(sdSampleCount);
     } else {
-      for (int i = 0; i < MAX_FIELD_LOG - 1; i++) {
-        fieldLog[i].epochTime   = fieldLog[i + 1].epochTime;
-        fieldLog[i].temperature  = fieldLog[i + 1].temperature;
-        fieldLog[i].salinity = fieldLog[i + 1].salinity;
-        fieldLog[i].depth = fieldLog[i + 1].depth;
-      }
-      fieldLog[MAX_FIELD_LOG - 1].epochTime = currentTime.getUnixTime();
-      fieldLog[MAX_FIELD_LOG - 1].temperature = tempC;
-      fieldLog[MAX_FIELD_LOG - 1].salinity = estimatedSalinity;
-      fieldLog[MAX_FIELD_LOG - 1].depth = calculatedDepthCm;
+      Serial.println("Error writing to data.csv on SD card!");
     }
   }
 }
@@ -336,6 +363,8 @@ void handleWebDashboard() {
       RTCTime newTime(epoch);
       RTC.setTime(newTime);
       timestampSet = true;
+      Serial.print("RTC Synced to Epoch: ");
+      Serial.println(epoch);
     }
 
     client.println("HTTP/1.1 200 OK");
@@ -343,24 +372,23 @@ void handleWebDashboard() {
     client.println("Connection: close\r\n");
     client.println("OK");
   }
-  // 2. ROUTE: DOWNLOAD CSV FILE (/csv)
+  // 2. ROUTE: DOWNLOAD CSV FILE DIRECTLY FROM SD CARD (/csv)
   else if (request.indexOf("/csv") != -1) {
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: text/csv");
-    client.println("Content-Disposition: attachment; filename=\"goldilocks_stage1_test.csv\"");
+    client.println("Content-Disposition: attachment; filename=\"goldilocks_sd_data.csv\"");
     client.println("Connection: close\r\n");
 
-    client.println("Sample_ID,Unix_Timestamp,Temperature_C,Salinity_ppt,Depth_cm");
-    for (int i = 0; i < fieldLogIndex; i++) {
-      client.print(i + 1);
-      client.print(",");
-      client.print(fieldLog[i].epochTime);
-      client.print(",");
-      client.print(fieldLog[i].temperature, 1);
-      client.print(",");
-      client.print(fieldLog[i].salinity, 1);
-      client.print(",");
-      client.println(fieldLog[i].depth, 1);
+    if (SD.exists(LOG_FILENAME)) {
+      File logFile = SD.open(LOG_FILENAME, FILE_READ);
+      if (logFile) {
+        uint8_t buffer[64]; // Fast transmission buffer
+        while (logFile.available()) {
+          int bytesRead = logFile.read(buffer, sizeof(buffer));
+          client.write(buffer, bytesRead);
+        }
+        logFile.close();
+      }
     }
   }
   // 3. ROUTE: JSON DATA ENDPOINT FOR DASHBOARD (/data)
@@ -379,7 +407,7 @@ void handleWebDashboard() {
     client.print(",\"status\":\""); client.print(statusLine2); client.print("\"");
     client.print(",\"goldi\":"); client.print(isGoldilocks ? "true" : "false");
     client.print(",\"passed\":"); client.print(passedCount);
-    client.print(",\"samples\":"); client.print(fieldLogIndex);
+    client.print(",\"samples\":"); client.print(sdSampleCount);
 
     client.print(",\"sal\":[");
     for (int i = 0; i < historyCount; i++) { client.print(salHistory[i], 1); if (i < historyCount - 1) client.print(","); }
@@ -431,7 +459,7 @@ void handleWebDashboard() {
     client.println("<canvas id='depthChart'></canvas>");
 
     // Long-term log counter & CSV download button
-    client.println("<a href='/csv' class='btn'>Download CSV Data (<span id='logCount'>0</span>/360)</a>");
+    client.println("<a href='/csv' class='btn'>Download SD CSV (<span id='logCount'>0</span> samples)</a>");
 
     client.println("</div>");
 
