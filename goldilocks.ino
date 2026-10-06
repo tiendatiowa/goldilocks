@@ -21,7 +21,7 @@ const float DEPTH_MIN = 10.0, DEPTH_MAX = 80.0; // cm
 
 // Data Logging Configurations
 const int MAX_HISTORY = 150;     // Rolling graph history (5 mins @ 1 sample / 2 sec)
-const int SD_CS_PIN   = 2;       // DFR0229 Chip Select pin on Expansion Shield v7.1
+const int SD_CS_PIN   = 2;       // Verified Chip Select pin on Expansion Shield v7.1
 const char* LOG_FILENAME = "data.csv";
 
 // Pin Definitions
@@ -98,8 +98,8 @@ void setup() {
   digitalWrite(TRIG_PIN, LOW);
 
   tempSensor.begin();
-  tempSensor.setWaitForConversion(false); // Initiate async mode
-  tempSensor.requestTemperatures();       // Initial trigger
+  tempSensor.setWaitForConversion(false); // Async mode to prevent Wi-Fi latency
+  tempSensor.requestTemperatures();       // Initial conversion trigger
 
   lcd.init();
   lcd.clear();
@@ -108,16 +108,20 @@ void setup() {
   lcd.setCursor(0, 1);
   lcd.print("Starting SD & AP...");
 
-  // Initialize MicroSD Card Module (DFR0229 on Pin 4)
+  // Set hardware SPI SS pin (Pin 10) to OUTPUT HIGH for Uno R4 ARM SPI bus stability
+  pinMode(10, OUTPUT);
+  digitalWrite(10, HIGH);
+
+  // Initialize MicroSD Card Module on Pin 2
   if (SD.begin(SD_CS_PIN)) {
     sdOK = true;
-    Serial.println("SD Card Initialized Successfully!");
+    Serial.println("SD Card Initialized Successfully on Pin 2!");
 
     // Create file and CSV header if file doesn't exist
     if (!SD.exists(LOG_FILENAME)) {
       File logFile = SD.open(LOG_FILENAME, FILE_WRITE);
       if (logFile) {
-        logFile.println("Sample_ID,Unix_Timestamp,Temperature_C,Salinity_ppt,Depth_cm");
+        logFile.println("Sample_ID,Unix_Timestamp,Time_Synced,Temperature_C,Salinity_ppt,Depth_cm");
         logFile.close();
       }
     } else {
@@ -188,11 +192,11 @@ void loop() {
 // =============================================================
 
 void readSensors() {
-  // 1. Read Temperature (°C)
+  // 1. Read Temperature (°C) - Async
   tempC = tempSensor.getTempCByIndex(0);
-  tempSensor.requestTemperatures(); // trigger background conversion for next loop
+  tempSensor.requestTemperatures(); // Trigger background conversion for next loop
 
-  // 2. Read Depth with Zero-Rejection & Ring-Down Settling
+  // 2. Read Depth with Zero-Rejection & Acoustic Ring-Down Settling
   int numOfSamples = 3;
   float validSamples[numOfSamples];
   int validCount = 0;
@@ -218,10 +222,10 @@ void readSensors() {
       validCount++;
     }
     
-    delay(70); // 70ms delay for acoustic ring-down
+    delay(70); // 70ms acoustic ring-down delay
   }
 
-  // Process valid non-zero samples
+  // Process valid non-zero samples (Median filter)
   if (validCount > 0) {
     for (int i = 0; i < validCount - 1; i++) {
       for (int j = i + 1; j < validCount; j++) {
@@ -300,30 +304,34 @@ void recordDataHistory() {
 
 // 30-second interval long-term field logger (Appends directly to MicroSD)
 void recordFieldSample() {
-  if (timestampSet && sdOK) {
-    RTCTime currentTime;
-    RTC.getTime(currentTime);
-    unsigned long epoch = currentTime.getUnixTime();
+  if (!sdOK) return;
 
-    File logFile = SD.open(LOG_FILENAME, FILE_WRITE);
-    if (logFile) {
-      sdSampleCount++;
-      logFile.print(sdSampleCount);
-      logFile.print(",");
-      logFile.print(epoch);
-      logFile.print(",");
-      logFile.print(tempC, 1);
-      logFile.print(",");
-      logFile.print(estimatedSalinity, 1);
-      logFile.print(",");
-      logFile.println(calculatedDepthCm, 1);
-      logFile.close();
+  RTCTime currentTime;
+  RTC.getTime(currentTime);
+  unsigned long epoch = currentTime.getUnixTime();
 
-      Serial.print("SD Logged Sample #");
-      Serial.println(sdSampleCount);
-    } else {
-      Serial.println("Error writing to data.csv on SD card!");
-    }
+  File logFile = SD.open(LOG_FILENAME, FILE_WRITE);
+  if (logFile) {
+    sdSampleCount++;
+    logFile.print(sdSampleCount);
+    logFile.print(",");
+    logFile.print(epoch);
+    logFile.print(",");
+    logFile.print(timestampSet ? "1" : "0"); // 1 = Real epoch synced, 0 = Unsynced boot relative time
+    logFile.print(",");
+    logFile.print(tempC, 1);
+    logFile.print(",");
+    logFile.print(estimatedSalinity, 1);
+    logFile.print(",");
+    logFile.println(calculatedDepthCm, 1);
+    logFile.close();
+
+    Serial.print("SD Logged Sample #");
+    Serial.print(sdSampleCount);
+    Serial.print(" | Synced: ");
+    Serial.println(timestampSet ? "YES" : "NO");
+  } else {
+    Serial.println("Error writing to data.csv on SD card!");
   }
 }
 
@@ -408,6 +416,7 @@ void handleWebDashboard() {
     client.print(",\"goldi\":"); client.print(isGoldilocks ? "true" : "false");
     client.print(",\"passed\":"); client.print(passedCount);
     client.print(",\"samples\":"); client.print(sdSampleCount);
+    client.print(",\"synced\":"); client.print(timestampSet ? "true" : "false");
 
     client.print(",\"sal\":[");
     for (int i = 0; i < historyCount; i++) { client.print(salHistory[i], 1); if (i < historyCount - 1) client.print(","); }
@@ -431,6 +440,9 @@ void handleWebDashboard() {
     client.println("body { font-family: Arial; text-align: center; background: #eef2f5; margin:0; padding:15px; }");
     client.println(".card { background: white; padding: 20px; border-radius: 12px; max-width: 420px; margin: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }");
     client.println(".badge { padding: 12px; border-radius: 8px; font-weight: bold; font-size: 18px; margin-bottom: 20px; transition: all 0.3s; }");
+    client.println(".sync-box { display: flex; align-items: center; justify-content: space-between; background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 8px 12px; margin-bottom: 15px; font-size: 13px; }");
+    client.println(".sync-btn { background: #007bff; color: white; border: none; padding: 6px 12px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 12px; }");
+    client.println(".sync-btn:disabled { background: #6c757d; opacity: 0.65; cursor: not-allowed; }");
     client.println(".row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #eee; font-size: 16px; }");
     client.println(".label { text-align: left; }");
     client.println(".subtext { font-size: 12px; color: #777; display: block; }");
@@ -442,6 +454,12 @@ void handleWebDashboard() {
     client.println("<h2>Goldilocks Pod</h2>");
     
     client.println("<div id='badge' class='badge'>Loading...</div>");
+
+    // Time Sync Status Banner & Manual Retry Button
+    client.println("<div class='sync-box'>");
+    client.println("<span id='syncStatus' style='color: #6c757d;'>Connecting to RTC...</span>");
+    client.println("<button id='syncBtn' class='sync-btn' onclick='syncTime()' style='display: none;'>Retry Sync</button>");
+    client.println("</div>");
 
     // Salinity
     client.println("<div class='row'><div class='label'><b>Salinity</b><span class='subtext'>Target: 15.0 - 30.0 ppt</span></div>");
@@ -463,11 +481,35 @@ void handleWebDashboard() {
 
     client.println("</div>");
 
-    // JavaScript: Dashboard Fetching, Auto-Time Sync & Graph Drawing
+    // JavaScript: Dashboard Fetching, Explicit Time Sync & Graph Drawing
     client.println("<script>");
     
-    // Silent auto-sync phone time on connection
-    client.println("fetch('/settime?epoch=' + Math.floor(Date.now() / 1000));");
+    // Explicit Time Sync Function
+    client.println("function syncTime() {");
+    client.println("  const statusEl = document.getElementById('syncStatus');");
+    client.println("  const btn = document.getElementById('syncBtn');");
+    client.println("  statusEl.innerText = 'Syncing phone time...';");
+    client.println("  statusEl.style.color = '#6c757d';");
+    client.println("  btn.disabled = true;");
+    
+    client.println("  const epoch = Math.floor(Date.now() / 1000);");
+    client.println("  fetch('/settime?epoch=' + epoch)");
+    client.println("    .then(r => { if(r.ok) return r.text(); else throw new Error('Failed'); })");
+    client.println("    .then(() => {");
+    client.println("      statusEl.innerText = '\\u2713 Time Synced with Phone';");
+    client.println("      statusEl.style.color = '#28a745';");
+    client.println("      btn.style.display = 'none';");
+    client.println("    })");
+    client.println("    .catch(e => {");
+    client.println("      statusEl.innerText = '\\u26A0 Time Unsynced';");
+    client.println("      statusEl.style.color = '#dc3545';");
+    client.println("      btn.style.display = 'inline-block';");
+    client.println("      btn.disabled = false;");
+    client.println("    });");
+    client.println("}");
+
+    // Run sync automatically on initial page load
+    client.println("syncTime();");
 
     client.println("function drawGraph(id, data, baseColor, minScale, maxScale, targetMin, targetMax) {");
     client.println("  const c = document.getElementById(id); if(!c) return;");
@@ -529,6 +571,19 @@ void handleWebDashboard() {
     client.println("    b.innerText = d.status;");
     client.println("    b.style.background = d.goldi ? '#28a745' : (d.passed === 0 ? '#dc3545' : '#ffc107');");
     client.println("    b.style.color = (d.passed > 0 && !d.goldi) ? '#000000' : '#ffffff';");
+
+    // Sync banner status update from server state
+    client.println("    const statusEl = document.getElementById('syncStatus');");
+    client.println("    const btn = document.getElementById('syncBtn');");
+    client.println("    if (d.synced) {");
+    client.println("      statusEl.innerText = '\\u2713 Time Synced with Phone';");
+    client.println("      statusEl.style.color = '#28a745';");
+    client.println("      btn.style.display = 'none';");
+    client.println("    } else if (statusEl.innerText !== 'Syncing phone time...') {");
+    client.println("      statusEl.innerText = '\\u26A0 Time Unsynced';");
+    client.println("      statusEl.style.color = '#dc3545';");
+    client.println("      btn.style.display = 'inline-block';");
+    client.println("    }");
 
     client.println("    const sEl = document.getElementById('salVal');");
     client.println("    sEl.innerText = d.salVal.toFixed(1) + ' ppt'; sEl.style.color = d.salOK ? '#0077b6' : '#dc3545';");
