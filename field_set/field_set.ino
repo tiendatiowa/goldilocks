@@ -226,7 +226,7 @@ float readSubmersibleDepthCm() {
   Serial.print(voltage);
   Serial.print("; depthCm = ");
   Serial.println(depthCm);
-  
+
   return depthCm;
 }
 
@@ -264,6 +264,7 @@ void readRS485Salinity() {
           // Register 0x0002: Salinity (ppm) -> Convert to ppt (1 ppt = 1000 ppm)
           uint16_t salinityPPM = (response[7] << 8) | response[8];
           estimatedSalinity = (float)salinityPPM / 1000.0;
+          estimatedSalinity *= 2; // Demo mode
         }
 
         Serial.print("RS485 EC: "); Serial.print(rs485EC_uS, 0);
@@ -297,8 +298,8 @@ void evaluateHabitat() {
   tempOK     = (tempC >= TEMP_MIN && tempC <= TEMP_MAX);
   depthOK    = (calculatedDepthCm >= DEPTH_MIN && calculatedDepthCm <= DEPTH_MAX);
 
-  isGoldilocks = salinityOK && tempOK && depthOK;
-  passedCount  = (salinityOK ? 1 : 0) + (tempOK ? 1 : 0) + (depthOK ? 1 : 0);
+  isGoldilocks = salinityOK; // Demo mode
+  passedCount  = (salinityOK ? 1 : 0); // Demo mode
 
   if (isGoldilocks) {
     statusLine2 = "GOLDILOCKS ZONE";
