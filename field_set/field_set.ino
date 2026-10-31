@@ -23,11 +23,15 @@ const int MAX_HISTORY = 150;     // Rolling graph history (5 mins @ 1 sample / 2
 const int SD_CS_PIN   = 2;       // Verified Chip Select pin on Expansion Shield v7.1
 const char* LOG_FILENAME = "data.csv";
 
+const float ZERO_VOLTAGE = 0.52; // Measured dry voltage in air
+
 // Pin Definitions
 #define RGB_PIN 3
 #define ONE_WIRE_BUS 5
 #define TRIG_PIN 6
 #define ECHO_PIN 7
+#define PRESSURE_PIN A1
+
 
 // MicroSD Status Variables
 bool sdOK = false;
@@ -72,6 +76,7 @@ int lcdPage = 0;
 // Function Declarations
 void readSensors();
 void readRS485Salinity();
+float readSubmersibleDepthCm();
 uint16_t calculateCRC16(const uint8_t *buf, int len);
 void evaluateHabitat();
 void updateStatusLED();
@@ -198,57 +203,31 @@ void readSensors() {
   tempSensor.requestTemperatures();
 
   // 2. Read Depth with Zero-Rejection & Acoustic Ring-Down Settling
-  int numOfSamples = 3;
-  float validSamples[numOfSamples];
-  int validCount = 0;
-
-  for (int i = 0; i < numOfSamples; i++) {
-    pinMode(ECHO_PIN, OUTPUT);
-    digitalWrite(ECHO_PIN, LOW);
-    delayMicroseconds(10);
-    pinMode(ECHO_PIN, INPUT);
-
-    digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(10);
-    digitalWrite(TRIG_PIN, HIGH);
-    delayMicroseconds(30);
-    digitalWrite(TRIG_PIN, LOW);
-
-    long duration = pulseIn(ECHO_PIN, HIGH, 35000);
-    float dist = (duration > 0) ? (duration * 0.034 / 2.0) : 0;
-
-    if (dist >= 30.0 && dist <= 300.0) {
-      validSamples[validCount] = dist;
-      validCount++;
-    }
-    
-    delay(70); // Acoustic ring-down delay
-  }
-
-  if (validCount > 0) {
-    for (int i = 0; i < validCount - 1; i++) {
-      for (int j = i + 1; j < validCount; j++) {
-        if (validSamples[i] > validSamples[j]) {
-          float temp = validSamples[i];
-          validSamples[i] = validSamples[j];
-          validSamples[j] = temp;
-        }
-      }
-    }
-    
-    float medianRawDist = validSamples[validCount / 2];
-
-    if (medianRawDist >= SENSOR_OFFSET_CM) {
-      lastValidDepthCm = medianRawDist - SENSOR_OFFSET_CM;
-    } else {
-      lastValidDepthCm = 0.0;
-    }
-  } 
-
-  calculatedDepthCm = lastValidDepthCm;
+  calculatedDepthCm = readSubmersibleDepthCm();
 
   // 3. Read RS485 Modbus EC / Salinity Sensor
   readRS485Salinity();
+}
+
+float readSubmersibleDepthCm() {
+  int rawADC = analogRead(A1);
+  float voltage = rawADC * (5.0 / 1023.0); 
+  float depthCm;
+
+  // If voltage is at or below dry baseline, depth is 0 cm
+  if (voltage <= ZERO_VOLTAGE) {
+    depthCm = 0.0;
+  } else {
+    // Scale from your actual zero voltage to 20mA (2.40V)
+    depthCm = ((voltage - ZERO_VOLTAGE) / (2.40 - ZERO_VOLTAGE)) * 500.0;
+  }
+
+  Serial.print("Pressure sensor: voltage = ");
+  Serial.print(voltage);
+  Serial.print("; depthCm = ");
+  Serial.println(depthCm);
+  
+  return depthCm;
 }
 
 // Modbus RTU Reader for DFRobot RS485 EC Sensor (K=10, Addr: 0x01, Baud: 4800)
@@ -278,10 +257,14 @@ void readRS485Salinity() {
         
         // Register 0x0000: EC value (uS/cm)
         rs485EC_uS = (float)((response[3] << 8) | response[4]);
-
-        // Register 0x0002: Salinity (ppm) -> Convert to ppt (1 ppt = 1000 ppm)
-        uint16_t salinityPPM = (response[7] << 8) | response[8];
-        estimatedSalinity = (float)salinityPPM / 1000.0;
+        if (rs485EC_uS < 25.0) {
+          // Probe is in air or dry
+          estimatedSalinity = 0.0;
+        } else {
+          // Register 0x0002: Salinity (ppm) -> Convert to ppt (1 ppt = 1000 ppm)
+          uint16_t salinityPPM = (response[7] << 8) | response[8];
+          estimatedSalinity = (float)salinityPPM / 1000.0;
+        }
 
         Serial.print("RS485 EC: "); Serial.print(rs485EC_uS, 0);
         Serial.print(" uS/cm | Salinity: "); Serial.print(estimatedSalinity, 2); Serial.println(" ppt");
