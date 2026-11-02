@@ -324,18 +324,18 @@ void updateStatusLED() {
 void recordDataHistory() {
   if (historyCount < MAX_HISTORY) {
     salHistory[historyCount]   = estimatedSalinity;
-    tempHistory[historyCount]  = tempC;
-    depthHistory[historyCount] = calculatedDepthCm;
+    // tempHistory[historyCount]  = tempC;
+    // depthHistory[historyCount] = calculatedDepthCm;
     historyCount++;
   } else {
     for (int i = 0; i < MAX_HISTORY - 1; i++) {
       salHistory[i]   = salHistory[i + 1];
-      tempHistory[i]  = tempHistory[i + 1];
-      depthHistory[i] = depthHistory[i + 1];
+      // tempHistory[i]  = tempHistory[i + 1];
+      // depthHistory[i] = depthHistory[i + 1];
     }
     salHistory[MAX_HISTORY - 1]   = estimatedSalinity;
-    tempHistory[MAX_HISTORY - 1]  = tempC;
-    depthHistory[MAX_HISTORY - 1] = calculatedDepthCm;
+    // tempHistory[MAX_HISTORY - 1]  = tempC;
+    // depthHistory[MAX_HISTORY - 1] = calculatedDepthCm;
   }
 }
 
@@ -396,6 +396,7 @@ void handleWebDashboard() {
   String request = client.readStringUntil('\r');
   client.flush();
 
+  // 1. Phone Time Synchronization Endpoint
   if (request.indexOf("/settime?epoch=") != -1) {
     int startIdx = request.indexOf("epoch=") + 6;
     int endIdx = request.indexOf(" ", startIdx);
@@ -415,6 +416,7 @@ void handleWebDashboard() {
     client.println("Connection: close\r\n");
     client.println("OK");
   }
+  // 2. CSV Download Endpoint
   else if (request.indexOf("/csv") != -1) {
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: text/csv");
@@ -433,127 +435,126 @@ void handleWebDashboard() {
       }
     }
   }
+  // 3. Lightweight JSON Data Endpoint (Salinity Only)
   else if (request.indexOf("/data") != -1) {
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: application/json");
-    client.println("Connection: close");
-    client.println();
+    client.println("Connection: close\r\n");
 
     client.print("{\"salVal\":"); client.print(estimatedSalinity, 1);
     client.print(",\"salOK\":"); client.print(salinityOK ? "true" : "false");
     client.print(",\"tempVal\":"); client.print(tempC, 1);
-    client.print(",\"tempOK\":"); client.print(tempOK ? "true" : "false");
     client.print(",\"depthVal\":"); client.print(calculatedDepthCm, 1);
-    client.print(",\"depthOK\":"); client.print(depthOK ? "true" : "false");
     client.print(",\"status\":\""); client.print(statusLine2); client.print("\"");
     client.print(",\"goldi\":"); client.print(isGoldilocks ? "true" : "false");
-    client.print(",\"passed\":"); client.print(passedCount);
     client.print(",\"samples\":"); client.print(sdSampleCount);
     client.print(",\"synced\":"); client.print(timestampSet ? "true" : "false");
 
     client.print(",\"sal\":[");
-    for (int i = 0; i < historyCount; i++) { client.print(salHistory[i], 1); if (i < historyCount - 1) client.print(","); }
-    client.print("],\"temp\":[");
-    for (int i = 0; i < historyCount; i++) { client.print(tempHistory[i], 1); if (i < historyCount - 1) client.print(","); }
-    client.print("],\"depth\":[");
-    for (int i = 0; i < historyCount; i++) { client.print(depthHistory[i], 1); if (i < historyCount - 1) client.print(","); }
+    for (int i = 0; i < historyCount; i++) {
+      client.print(salHistory[i], 1);
+      if (i < historyCount - 1) client.print(",");
+    }
     client.print("]}");
   } 
+  // 4. Main Clean Dashboard Page
   else {
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: text/html; charset=utf-8");
-    client.println("Connection: close");
-    client.println();
+    client.println("Connection: close\r\n");
 
     client.println("<!DOCTYPE html><html><head>");
     client.println("<meta charset='UTF-8'>");
     client.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
     client.println("<style>");
-    client.println("body { font-family: Arial; text-align: center; background: #eef2f5; margin:0; padding:15px; }");
-    client.println(".card { background: white; padding: 20px; border-radius: 12px; max-width: 420px; margin: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }");
-    client.println(".badge { padding: 12px; border-radius: 8px; font-weight: bold; font-size: 18px; margin-bottom: 20px; transition: all 0.3s; }");
-    client.println(".sync-box { display: flex; align-items: center; justify-content: space-between; background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 8px 12px; margin-bottom: 15px; font-size: 13px; }");
-    client.println(".sync-btn { background: #007bff; color: white; border: none; padding: 6px 12px; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 12px; }");
-    client.println(".sync-btn:disabled { background: #6c757d; opacity: 0.65; cursor: not-allowed; }");
-    client.println(".row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #eee; font-size: 16px; }");
-    client.println(".label { text-align: left; }");
-    client.println(".subtext { font-size: 12px; color: #777; display: block; }");
-    client.println("canvas { width: 100%; height: 130px; background: #fafafa; border: 1px solid #ddd; border-radius: 6px; margin-top: 6px; }");
-    client.println(".btn { display: block; width: 100%; box-sizing: border-box; padding: 14px; background: #28a745; color: white; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px; margin-top: 20px; text-align: center; }");
+    client.println("body { font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif; text-align: center; background: #eef2f5; margin:0; padding:15px; }");
+    client.println(".card { background: white; padding: 22px; border-radius: 14px; max-width: 400px; margin: auto; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }");
+    client.println(".badge { padding: 10px; border-radius: 8px; font-weight: bold; font-size: 16px; margin-bottom: 12px; transition: all 0.3s; }");
+    client.println(".sync-box { display: flex; align-items: center; justify-content: space-between; background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 6px 10px; margin-bottom: 15px; font-size: 12px; }");
+    client.println(".sync-btn { background: #007bff; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 11px; }");
+    client.println(".main-metric { margin: 15px 0 5px 0; }");
+    client.println(".sal-val { font-size: 42px; font-weight: 800; color: #0077b6; line-height: 1.1; }");
+    client.println(".target-sub { font-size: 13px; color: #6c757d; margin-top: 4px; }");
+    client.println("canvas { width: 100%; height: 180px; background: #fafafa; border: 1px solid #e0e0e0; border-radius: 8px; margin: 15px 0; }");
+    client.println(".meta-row { display: flex; justify-content: space-around; background: #f8f9fa; border-radius: 8px; padding: 10px; font-size: 13px; color: #495057; margin-bottom: 15px; }");
+    client.println(".btn { display: block; width: 100%; box-sizing: border-box; padding: 12px; background: #28a745; color: white; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 15px; text-align: center; }");
     client.println("</style></head><body>");
-    
-    client.println("<div class='card'>");
-    client.println("<h2>Goldilocks Pod</h2>");
-    
-    client.println("<div id='badge' class='badge'>Loading...</div>");
 
+    client.println("<div class='card'>");
+    client.println("<h2 style='margin:0 0 12px 0;'>Goldilocks Pod</h2>");
+
+    client.println("<div id='badge' class='badge'>Connecting...</div>");
+
+    // Clock Sync Bar
     client.println("<div class='sync-box'>");
     client.println("<span id='syncStatus' style='color: #6c757d;'>Connecting to RTC...</span>");
     client.println("<button id='syncBtn' class='sync-btn' onclick='syncTime()' style='display: none;'>Retry Sync</button>");
     client.println("</div>");
 
-    // Salinity
-    client.println("<div class='row'><div class='label'><b>Salinity</b><span class='subtext'>Target: 15.0 - 30.0 ppt</span></div>");
-    client.println("<b id='salVal' style='font-size:18px;'>-- ppt</b></div>");
+    // Primary Focal Metric: Salinity
+    client.println("<div class='main-metric'>");
+    client.println("  <div class='target-sub'>ESTUARINE SALINITY</div>");
+    client.println("  <div id='salVal' class='sal-val'>-- ppt</div>");
+    client.println("  <div class='target-sub'>Target Range: 15.0 – 30.0 ppt</div>");
+    client.println("</div>");
+
+    // Single Full-Width Timeseries Chart
     client.println("<canvas id='salChart'></canvas>");
 
-    // Temperature
-    client.println("<div class='row'><div class='label'><b>Temperature</b><span class='subtext'>Target: 10.0 - 25.0 &deg;C</span></div>");
-    client.println("<b id='tempVal' style='font-size:18px;'>-- &deg;C</b></div>");
-    client.println("<canvas id='tempChart'></canvas>");
-
-    // Depth
-    client.println("<div class='row'><div class='label'><b>Depth</b><span class='subtext'>Target: 10.0 - 80.0 cm</span></div>");
-    client.println("<b id='depthVal' style='font-size:18px;'>-- cm</b></div>");
-    client.println("<canvas id='depthChart'></canvas>");
+    // Secondary Readout Strip (Temp & Depth without distracting graphs)
+    client.println("<div class='meta-row'>");
+    client.println("  <div>Temp: <b id='tempVal'>--</b>&deg;C</div>");
+    client.println("  <div>|</div>");
+    client.println("  <div>Depth: <b id='depthVal'>--</b> cm</div>");
+    client.println("</div>");
 
     // CSV Download
-    client.println("<a href='/csv' class='btn'>Download SD CSV (<span id='logCount'>0</span> samples)</a>");
+    client.println("<a href='/csv' class='btn'>Download SD CSV (<span id='logCount'>0</span>)</a>");
 
     client.println("</div>");
 
+    // JavaScript
     client.println("<script>");
-    
     client.println("function syncTime() {");
     client.println("  const statusEl = document.getElementById('syncStatus');");
     client.println("  const btn = document.getElementById('syncBtn');");
-    client.println("  statusEl.innerText = 'Syncing phone time...';");
-    client.println("  statusEl.style.color = '#6c757d';");
-    client.println("  btn.disabled = true;");
-    
+    client.println("  statusEl.innerText = 'Syncing...';");
     client.println("  const epoch = Math.floor(Date.now() / 1000);");
     client.println("  fetch('/settime?epoch=' + epoch)");
-    client.println("    .then(r => { if(r.ok) return r.text(); else throw new Error('Failed'); })");
+    client.println("    .then(r => { if(r.ok) return r.text(); else throw new Error(); })");
     client.println("    .then(() => {");
     client.println("      statusEl.innerText = '\\u2713 Time Synced with Phone';");
     client.println("      statusEl.style.color = '#28a745';");
     client.println("      btn.style.display = 'none';");
     client.println("    })");
-    client.println("    .catch(e => {");
+    client.println("    .catch(() => {");
     client.println("      statusEl.innerText = '\\u26A0 Time Unsynced';");
     client.println("      statusEl.style.color = '#dc3545';");
     client.println("      btn.style.display = 'inline-block';");
-    client.println("      btn.disabled = false;");
     client.println("    });");
     client.println("}");
-
     client.println("syncTime();");
 
-    client.println("function drawGraph(id, data, baseColor, minScale, maxScale, targetMin, targetMax) {");
-    client.println("  const c = document.getElementById(id); if(!c) return;");
+    // Chart Renderer for Salinity
+    client.println("function drawSalChart(data) {");
+    client.println("  const c = document.getElementById('salChart'); if(!c) return;");
     client.println("  const ctx = c.getContext('2d');");
     client.println("  c.width = c.clientWidth; c.height = c.clientHeight;");
     client.println("  ctx.clearRect(0,0,c.width,c.height);");
-    
+
+    client.println("  const minScale = 0, maxScale = 40;");
+    client.println("  const targetMin = 15.0, targetMax = 30.0;");
     client.println("  let plotHeight = c.height - 20;");
 
-    client.println("  let yMinTarget = plotHeight - ((targetMin - minScale)/(maxScale - minScale) * (plotHeight - 10) + 5);");
-    client.println("  let yMaxTarget = plotHeight - ((targetMax - minScale)/(maxScale - minScale) * (plotHeight - 10) + 5);");
-    client.println("  ctx.fillStyle = 'rgba(40, 167, 69, 0.08)';");
-    client.println("  ctx.fillRect(0, Math.min(yMinTarget, yMaxTarget), c.width, Math.abs(yMinTarget - yMaxTarget));");
+    // Draw Goldilocks Green Safe Zone
+    client.println("  let yMin = plotHeight - ((targetMin - minScale)/(maxScale - minScale) * (plotHeight - 10) + 5);");
+    client.println("  let yMax = plotHeight - ((targetMax - minScale)/(maxScale - minScale) * (plotHeight - 10) + 5);");
+    client.println("  ctx.fillStyle = 'rgba(40, 167, 69, 0.12)';");
+    client.println("  ctx.fillRect(0, Math.min(yMin, yMax), c.width, Math.abs(yMin - yMax));");
 
     client.println("  if(data.length < 2) return;");
 
+    // Draw Line
     client.println("  for(let i=0; i<data.length-1; i++) {");
     client.println("    let x1 = (i / (150 - 1)) * c.width;");
     client.println("    let norm1 = (data[i] - minScale) / (maxScale - minScale);");
@@ -562,10 +563,11 @@ void handleWebDashboard() {
     client.println("    let norm2 = (data[i+1] - minScale) / (maxScale - minScale);");
     client.println("    let y2 = plotHeight - (Math.max(0, Math.min(1, norm2)) * (plotHeight - 10) + 5);");
     client.println("    let isOut = (data[i] < targetMin || data[i] > targetMax || data[i+1] < targetMin || data[i+1] > targetMax);");
-    client.println("    ctx.strokeStyle = isOut ? '#dc3545' : baseColor;");
-    client.println("    ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();");
+    client.println("    ctx.strokeStyle = isOut ? '#dc3545' : '#0077b6';");
+    client.println("    ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();");
     client.println("  }");
 
+    // Red warning dots for out-of-range samples
     client.println("  for(let i=0; i<data.length; i++) {");
     client.println("    if(data[i] < targetMin || data[i] > targetMax) {");
     client.println("      let x = (i / (150 - 1)) * c.width;");
@@ -575,12 +577,11 @@ void handleWebDashboard() {
     client.println("    }");
     client.println("  }");
 
+    // X-Axis Timestamps
     client.println("  ctx.fillStyle = '#888888'; ctx.font = '10px Arial';");
     client.println("  let now = new Date();");
-    client.println("  let indices = [0, Math.floor((data.length - 1) / 2), data.length - 1];");
-    client.println("  indices.forEach((idx, tIdx) => {");
-    client.println("    let timeOffsetMs = (data.length - 1 - idx) * 2000;");
-    client.println("    let t = new Date(now.getTime() - timeOffsetMs);");
+    client.println("  [0, Math.floor((data.length - 1) / 2), data.length - 1].forEach((idx, tIdx) => {");
+    client.println("    let t = new Date(now.getTime() - (data.length - 1 - idx) * 2000);");
     client.println("    let timeStr = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });");
     client.println("    let x = (idx / (150 - 1)) * c.width;");
     client.println("    ctx.textAlign = (tIdx === 0) ? 'left' : (tIdx === 1 ? 'center' : 'right');");
@@ -588,39 +589,23 @@ void handleWebDashboard() {
     client.println("  });");
     client.println("}");
 
+    // Data Poll Loop
     client.println("function updateDashboard() {");
     client.println("  fetch('/data').then(r => r.json()).then(d => {");
     client.println("    const b = document.getElementById('badge');");
     client.println("    b.innerText = d.status;");
-    client.println("    b.style.background = d.goldi ? '#28a745' : (d.passed === 0 ? '#dc3545' : '#ffc107');");
-    client.println("    b.style.color = (d.passed > 0 && !d.goldi) ? '#000000' : '#ffffff';");
-
-    client.println("    const statusEl = document.getElementById('syncStatus');");
-    client.println("    const btn = document.getElementById('syncBtn');");
-    client.println("    if (d.synced) {");
-    client.println("      statusEl.innerText = '\\u2713 Time Synced with Phone';");
-    client.println("      statusEl.style.color = '#28a745';");
-    client.println("      btn.style.display = 'none';");
-    client.println("    } else if (statusEl.innerText !== 'Syncing phone time...') {");
-    client.println("      statusEl.innerText = '\\u26A0 Time Unsynced';");
-    client.println("      statusEl.style.color = '#dc3545';");
-    client.println("      btn.style.display = 'inline-block';");
-    client.println("    }");
+    client.println("    b.style.background = d.goldi ? '#28a745' : (d.salOK ? '#ffc107' : '#dc3545');");
+    client.println("    b.style.color = '#ffffff';");
 
     client.println("    const sEl = document.getElementById('salVal');");
-    client.println("    sEl.innerText = d.salVal.toFixed(1) + ' ppt'; sEl.style.color = d.salOK ? '#0077b6' : '#dc3545';");
+    client.println("    sEl.innerText = d.salVal.toFixed(1) + ' ppt';");
+    client.println("    sEl.style.color = d.salOK ? '#0077b6' : '#dc3545';");
 
-    client.println("    const tEl = document.getElementById('tempVal');");
-    client.println("    tEl.innerText = d.tempVal.toFixed(1) + ' \\u00B0C'; tEl.style.color = d.tempOK ? '#00a896' : '#dc3545';");
-
-    client.println("    const dEl = document.getElementById('depthVal');");
-    client.println("    dEl.innerText = d.depthVal.toFixed(1) + ' cm'; dEl.style.color = d.depthOK ? '#7209b7' : '#dc3545';");
-
+    client.println("    document.getElementById('tempVal').innerText = d.tempVal.toFixed(1);");
+    client.println("    document.getElementById('depthVal').innerText = d.depthVal.toFixed(1);");
     client.println("    document.getElementById('logCount').innerText = d.samples;");
 
-    client.println("    drawGraph('salChart', d.sal, '#0077b6', 0, 40, 15.0, 30.0);");
-    client.println("    drawGraph('tempChart', d.temp, '#00a896', 0, 40, 10.0, 25.0);");
-    client.println("    drawGraph('depthChart', d.depth, '#7209b7', 0, 150, 10.0, 80.0);");
+    client.println("    drawSalChart(d.sal);");
     client.println("  }).catch(e => console.log(e));");
     client.println("}");
 
@@ -631,3 +616,4 @@ void handleWebDashboard() {
   delay(1);
   client.stop();
 }
+
