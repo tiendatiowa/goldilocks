@@ -477,7 +477,7 @@ void handleWebDashboard() {
     client.println(".target-sub { font-size: 13px; color: #6c757d; margin-top: 4px; }");
     client.println("canvas { width: 100%; height: 180px; background: #fafafa; border: 1px solid #e0e0e0; border-radius: 8px; margin: 15px 0; }");
     client.println(".meta-row { display: flex; justify-content: space-around; background: #f8f9fa; border-radius: 8px; padding: 10px; font-size: 13px; color: #495057; margin-bottom: 15px; }");
-    client.println(".btn { display: block; width: 100%; box-sizing: border-box; padding: 12px; background: #28a745; color: white; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 15px; text-align: center; }");
+    client.println(".btn { display: block; width: 100%; box-sizing: border-box; padding: 12px; background: #6c757d; color: white; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 15px; text-align: center; }");
     client.println("</style></head><body>");
 
     client.println("<div class='card'>");
